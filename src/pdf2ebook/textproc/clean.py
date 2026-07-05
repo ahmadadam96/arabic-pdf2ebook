@@ -114,6 +114,25 @@ def arabic_ratio(text: str) -> float:
     return len(_ARABIC_ONLY_RE.findall(compact)) / len(compact)
 
 
+# U+FFFD replacement char + Private Use Area (BMP + planes 15/16). A high share
+# means a legacy non-Unicode font is embedded as a fake text layer: the glyphs
+# render on screen but the codepoints carry no meaning, so the page must be OCR'd
+# from its rendered image instead.
+def bad_glyph_ratio(text: str) -> float:
+    """Fraction of non-space characters that are U+FFFD or Private-Use glyphs."""
+    total = 0
+    bad = 0
+    for ch in text:
+        if ch.isspace():
+            continue
+        total += 1
+        cp = ord(ch)
+        if (cp == 0xFFFD or 0xE000 <= cp <= 0xF8FF
+                or 0xF0000 <= cp <= 0xFFFFD or 0x100000 <= cp <= 0x10FFFD):
+            bad += 1
+    return bad / total if total else 0.0
+
+
 def clean_heading(text: str) -> str:
     """Tidy an OCR'd chapter heading for use as a TOC label.
 

@@ -5,22 +5,28 @@ from pathlib import Path
 from pdf2ebook.pdfio import PdfRasterizer
 
 
-def _make_text_pdf(path: Path, items: list[tuple[str, int, int, int]]) -> None:
+def _make_text_pdf(path: Path, items: list[tuple]) -> None:
     """Write a minimal one-page PDF with a real text layer.
 
-    `items` is a list of (text, x, y, font_size) in PDF points (bottom-left
-    origin). Text is ASCII (Helvetica) — this exercises geometry/size
-    extraction, not Arabic shaping.
+    `items` is a list of (text, x, y, font_size[, font]) in PDF points
+    (bottom-left origin); `font` is "F1" (Helvetica, default) or "F2"
+    (Helvetica-Bold). ASCII only — exercises geometry/size/weight extraction.
     """
-    ops = "\n".join(f"BT /F1 {size} Tf {x} {y} Td ({text}) Tj ET" for text, x, y, size in items)
+    def _op(item: tuple) -> str:
+        text, x, y, size = item[0], item[1], item[2], item[3]
+        font = item[4] if len(item) > 4 else "F1"
+        return f"BT /{font} {size} Tf {x} {y} Td ({text}) Tj ET"
+
+    ops = "\n".join(_op(it) for it in items)
     content = ops.encode("latin-1")
     objects = [
         b"<< /Type /Catalog /Pages 2 0 R >>",
         b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
         b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
-        b"/Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
+        b"/Resources << /Font << /F1 4 0 R /F2 6 0 R >> >> /Contents 5 0 R >>",
         b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
         b"<< /Length %d >>\nstream\n%s\nendstream" % (len(content), content),
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>",
     ]
     pdf = b"%PDF-1.4\n"
     offsets: list[int] = []
@@ -61,3 +67,18 @@ def test_extract_text_page_geometry(tmp_path):
     # bbox is top-left pixel space within the page.
     assert page.size == (612, 792)
     assert page.lines[0].bbox[0] >= 0 and page.lines[0].bbox[1] >= 0
+
+
+def test_extract_text_page_bold_flag(tmp_path):
+    pdf_path = tmp_path / "bold.pdf"
+    _make_text_pdf(pdf_path, [
+        ("Bold Heading Line", 100, 700, 18, "F2"),   # Helvetica-Bold
+        ("regular body text line", 100, 660, 12, "F1"),
+    ])
+    with PdfRasterizer(pdf_path) as pdf:
+        page = pdf.extract_text_page(0)
+
+    assert page is not None
+    by_y = sorted(page.lines, key=lambda ln: ln.bbox[1])
+    assert by_y[0].bold >= 0.5     # bold heading detected (weight or name fallback)
+    assert by_y[1].bold == 0.0     # regular text not bold

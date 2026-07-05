@@ -67,7 +67,8 @@ class PipelineOptions:
     work_dir: Path | None = None
     force: str | None = None  # extract | preprocess | ocr | all
     clean: bool = False
-    debug_markdown: Path | None = None  # write the in-memory Markdown here (debug only)
+    markdown_out: Path | None = None  # also write the editable Markdown (+ scans/) here
+    footnotes: bool = True  # detect footnote blocks and link them in the EPUB
     ocr: OcrOptions = field(default_factory=OcrOptions)
     image: ImageOptions = field(default_factory=ImageOptions)
     meta: EpubMeta = field(default_factory=EpubMeta)

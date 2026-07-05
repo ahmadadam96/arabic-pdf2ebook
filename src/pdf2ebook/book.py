@@ -10,7 +10,8 @@ from pathlib import Path
 @dataclass
 class Paragraph:
     text: str
-    kind: str = "p"  # p | h1 | h2 | h3 | ul | ol | verse | quran
+    kind: str = "p"  # p | h1 | h2 | h3 | ul | ol | verse | quran | footnote
+    note_id: str = ""  # set only on footnote paragraphs (links body ref ⇄ note)
 
 
 @dataclass
@@ -36,7 +37,10 @@ class Book:
     def to_json(self) -> str:
         def encode(obj):
             if isinstance(obj, Paragraph):
-                return {"t": "par", "text": obj.text, "kind": obj.kind}
+                data = {"t": "par", "text": obj.text, "kind": obj.kind}
+                if obj.note_id:
+                    data["note_id"] = obj.note_id
+                return data
             if isinstance(obj, PageImage):
                 return {"t": "img", "page_no": obj.page_no, "image_path": obj.image_path}
             raise TypeError(type(obj))
@@ -62,7 +66,7 @@ class Book:
             elements: list[Paragraph | PageImage] = []
             for e in c["elements"]:
                 if e["t"] == "par":
-                    elements.append(Paragraph(e["text"], e["kind"]))
+                    elements.append(Paragraph(e["text"], e["kind"], e.get("note_id", "")))
                 else:
                     elements.append(PageImage(e["page_no"], e["image_path"]))
             chapters.append(Chapter(c["title"], elements))

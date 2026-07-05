@@ -4,6 +4,11 @@ pdfmarkdown.app-style structuring: a heading is recognised from its size
 relative to the body text. When an exact font size is available (the PDF's
 embedded text layer), tiers are crisp; for OCR pages we fall back to the
 line-height-vs-page-median heuristic the project already used.
+
+A short line qualifies as a heading when it satisfies any of four signals:
+bigger-and-centred, keyword-and-centred, keyword-and-bigger, or bold. Arabic has
+no capitalisation, so a bold body-size line is a strong standalone heading cue;
+the bold signal is inert on OCR pages (which carry no weight data).
 """
 
 from __future__ import annotations
@@ -52,10 +57,14 @@ def heading_tiers(page: OcrPage, body_size: float = 0.0) -> dict[int, str]:
         words = len(text.split())
         if not text or words > MAX_HEADING_WORDS:
             continue
+        bold = False
         if body_size > 0 and ln.size > 0:
             ratio = ln.size / body_size
             big = ratio >= 1.15
             tier = _tier_font(ratio)
+            # Bold at (roughly) body size or larger is a heading on its own —
+            # only when real weight data exists, so OCR pages are unaffected.
+            bold = ln.bold >= 0.6 and ln.size >= body_size * 0.98
         else:
             ratio = ln.bbox[3] / med_height
             big = ratio > 1.35
@@ -63,6 +72,6 @@ def heading_tiers(page: OcrPage, body_size: float = 0.0) -> dict[int, str]:
         center = ln.bbox[0] + ln.bbox[2] / 2
         centered = abs(center - page_width / 2) < page_width * 0.12
         keyword = bool(HEADING_WORD_RE.match(text))
-        if (big and centered) or (keyword and centered) or (keyword and big):
-            out[i] = tier if big else "h2"
+        if (big and centered) or (keyword and centered) or (keyword and big) or bold:
+            out[i] = tier if big else ("h2" if keyword else _tier_font(ratio))
     return out

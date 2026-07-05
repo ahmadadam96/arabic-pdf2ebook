@@ -79,6 +79,21 @@ def test_looks_corrupted_arabic_detects_broken_lam_alef():
     assert not clean.looks_corrupted_arabic(healthy)
 
 
+def test_bad_glyph_ratio_flags_pua_and_replacement_chars():
+    # Clean Arabic -> 0.
+    assert clean.bad_glyph_ratio("وكان المسلمون") == 0.0
+    # Pure BMP Private-Use Area (a fake non-Unicode font layer) -> 1.
+    assert clean.bad_glyph_ratio("") == 1.0
+    # U+FFFD replacement chars count as bad (2 of 4 -> 0.5).
+    assert clean.bad_glyph_ratio("��ab") == 0.5
+    # Plane-15 PUA counts too.
+    assert clean.bad_glyph_ratio("󰀀󰀁") == 1.0
+    # Half PUA, half real; whitespace ignored (a, b, PUA, PUA -> 0.5).
+    assert clean.bad_glyph_ratio("ab ") == 0.5
+    # Empty / whitespace-only -> 0.
+    assert clean.bad_glyph_ratio("   ") == 0.0
+
+
 def _line(text: str, x: int, y: int, w: int, h: int = 30) -> OcrLine:
     return OcrLine(words=[OcrWord(text, 90.0, (x, y, w, h))], bbox=(x, y, w, h))
 

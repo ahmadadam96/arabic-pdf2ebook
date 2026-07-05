@@ -7,8 +7,10 @@ from pdf2ebook.textproc.lists import detect_list_items
 from pdf2ebook.textproc.structure import structure_page
 
 
-def _line(text: str, x: int, y: int, w: int, h: int = 14, size: float = 0.0) -> OcrLine:
-    return OcrLine(words=[OcrWord(text, 100.0, (x, y, w, h))], bbox=(x, y, w, h), size=size)
+def _line(text: str, x: int, y: int, w: int, h: int = 14, size: float = 0.0,
+          bold: float = 0.0) -> OcrLine:
+    return OcrLine(words=[OcrWord(text, 100.0, (x, y, w, h))], bbox=(x, y, w, h),
+                   size=size, bold=bold)
 
 
 def _no_drop(text: str, edge: bool) -> bool:
@@ -25,6 +27,55 @@ def test_font_size_heading_tiers():
     ])
     tiers = heading_tiers(page, body_size=12.0)
     assert tiers == {0: "h1", 1: "h2", 2: "h3"}
+
+
+def test_bold_body_size_line_is_heading():
+    # Bold, body-size, off-centre, no keyword → still a heading (h3) via bold arm.
+    page = OcrPage(page_no=0, size=(1000, 1000), lines=[
+        _line("عنوان عريض بحجم المتن", 100, 10, 300, 14, size=12, bold=0.8),
+        _line("نص عادي غير عريض يمتد هنا", 100, 60, 800, 14, size=12, bold=0.0),
+    ])
+    tiers = heading_tiers(page, body_size=12.0)
+    assert tiers.get(0) == "h3"
+    assert 1 not in tiers
+
+
+def test_bold_bigger_line_is_h2():
+    page = OcrPage(page_no=0, size=(1000, 1000), lines=[
+        _line("عنوان عريض وكبير", 100, 10, 300, 20, size=18, bold=0.9),
+        _line("نص عادي هنا", 100, 60, 800, 14, size=12),
+    ])
+    assert heading_tiers(page, body_size=12.0).get(0) == "h2"
+
+
+def test_weak_bold_is_not_a_heading():
+    page = OcrPage(page_no=0, size=(1000, 1000), lines=[
+        _line("سطر بحبر خفيف نسبيا", 100, 10, 300, 14, size=12, bold=0.4),
+        _line("نص عادي", 100, 60, 800, 14, size=12),
+    ])
+    assert heading_tiers(page, body_size=12.0) == {}
+
+
+def test_bold_ignored_on_ocr_pages():
+    # OCR page: size=0 → bold must be inert, behaviour unchanged.
+    page = OcrPage(page_no=0, size=(1000, 1000), lines=[
+        _line("سطر من OCR عريض", 100, 10, 300, 14, size=0.0, bold=1.0),
+        _line("نص آخر عادي", 100, 60, 800, 14, size=0.0),
+    ])
+    assert 0 not in heading_tiers(page, body_size=0.0)
+
+
+def test_ocrline_json_round_trip_with_bold():
+    import json
+    page = OcrPage(page_no=0, size=(100, 100),
+                   lines=[_line("x", 0, 0, 10, size=12.0, bold=0.75)])
+    blob = page.to_json()
+    assert OcrPage.from_json(blob).lines[0].bold == 0.75
+    # A legacy blob without the bold key loads as 0.0.
+    data = json.loads(blob)
+    for ln in data["lines"]:
+        ln.pop("bold", None)
+    assert OcrPage.from_json(json.dumps(data)).lines[0].bold == 0.0
 
 
 def test_ocr_height_fallback_heading():

@@ -84,6 +84,10 @@ def _run_job(job: Job, opts: PipelineOptions, out_path: Path) -> None:
             "pages_ocr": result.pages_ocr,
             "pages_image_fallback": result.pages_image_fallback,
         }
+        if result.report is not None:
+            job.stats["routes"] = result.report.route_counts()
+            job.stats["coverage"] = round(result.report.book_coverage, 3)
+            job.stats["warnings"] = result.report.warnings
         job.status = "done"
     except Exception as exc:  # surface anything to the page
         job.status = "error"
@@ -99,6 +103,7 @@ async def convert(
     split_volumes: int = Form(1),
     font: str = Form("amiri"),
     preshape: bool = Form(False),
+    footnotes: bool = Form(True),
 ) -> JSONResponse:
     if mode not in ("auto", "ocr", "image"):
         raise HTTPException(400, "mode must be auto, ocr or image")
@@ -112,7 +117,7 @@ async def convert(
 
     opts = PipelineOptions(
         mode=mode, split_volumes=max(1, split_volumes), font=font, preshape=preshape,
-        work_dir=job_root / "workdir",
+        footnotes=footnotes, work_dir=job_root / "workdir",
         ocr=OcrOptions(engine=engine),
         image=ImageOptions(device=device),
         meta=EpubMeta(),

@@ -83,9 +83,16 @@ def convert(
     work_dir: Optional[Path] = typer.Option(None, help="Cache directory (default: <book>.workdir)"),
     force: Optional[str] = typer.Option(None, help="Recompute stage: extract | preprocess | ocr | all"),
     clean: bool = typer.Option(False, help="Delete the work dir after a successful conversion"),
+    footnotes: bool = typer.Option(
+        True, "--footnotes/--no-footnotes",
+        help="Detect footnote blocks and link them (popup notes on modern readers)"),
+    markdown_out: Optional[Path] = typer.Option(
+        None, "--markdown-out",
+        help="Also write the editable Markdown (with a scans/ folder) next to the EPUB; "
+             "correct it by hand and rebuild with `pdf2ebook build`."),
     debug_markdown: Optional[Path] = typer.Option(
         None, "--debug-markdown", hidden=True,
-        help="Write the internal Markdown to this path for inspection (debug only)"),
+        help="Deprecated alias for --markdown-out."),
 ) -> None:
     """Convert a PDF book to EPUB."""
     if mode not in ("auto", "ocr", "image"):
@@ -95,8 +102,8 @@ def convert(
     opts = PipelineOptions(
         mode=mode, text_layer=text_layer, dpi=dpi, pages=pages, preshape=preshape,
         split_volumes=split_volumes, split_every=split_every,
-        font=font, work_dir=work_dir, force=force, clean=clean,
-        debug_markdown=debug_markdown,
+        font=font, work_dir=work_dir, force=force, clean=clean, footnotes=footnotes,
+        markdown_out=markdown_out or debug_markdown,
         ocr=OcrOptions(engine=engine, lang=lang, psm=psm, min_conf=min_conf,
                        rescue=rescue, strip_patterns=list(strip_pattern)),
         image=ImageOptions(device=device, width=width, height=height, style=style,
@@ -147,6 +154,68 @@ def convert(
             console.print(f"  mean OCR confidence: {avg:.0f}")
         if result.stripped_lines:
             console.print(f"  removed repeated watermark/header lines: {len(result.stripped_lines)}")
+        if result.report is not None:
+            _print_report(result.report)
+
+
+_ROUTE_LABELS = {
+    "text-layer": "نص مضمّن — text layer",
+    "ocr": "OCR",
+    "ocr-rescued": "OCR منقذ — rescued",
+    "image-kept": "صور — kept as image",
+    "blank": "فارغة — blank",
+}
+
+
+def _print_report(report) -> None:
+    """Render the per-run conversion report (route counts, coverage, warnings)."""
+    counts = report.route_counts()
+    if counts:
+        table = Table(title="تقرير التحويل — Conversion report")
+        table.add_column("المسار — Route", style="bold")
+        table.add_column("صفحات — Pages", justify="right")
+        for route, n in counts.items():
+            table.add_row(_ROUTE_LABELS.get(route, route), str(n))
+        console.print(table)
+    console.print(f"  تغطية النص — text coverage: {round(report.book_coverage * 100)}%")
+    for warning in report.warnings:
+        console.print(f"[yellow]⚠[/yellow] {warning}")
+
+
+@app.command()
+def build(
+    markdown: Path = typer.Argument(..., help="Markdown file from `convert --markdown-out` (may be hand-edited)"),
+    output: Optional[Path] = typer.Argument(None, help="Output EPUB path (default: beside the .md)"),
+    title: Optional[str] = typer.Option(None, help="EPUB title (overrides the file's front matter)"),
+    author: Optional[str] = typer.Option(None, help="EPUB author (overrides front matter)"),
+    language: Optional[str] = typer.Option(None, help="Language code (default: front matter, then 'ar')"),
+    split_every: int = typer.Option(10, help="Chapter fallback: one chapter per N pages when no headings"),
+    split_volumes: int = typer.Option(1, help="Split output into N EPUB volumes"),
+    font: str = typer.Option("amiri", help="Embedded font: amiri | scheherazade | none"),
+    preshape: bool = typer.Option(
+        False, "--preshape", help="Bake Arabic letter-joining (simple readers like CrossPoint only)"),
+) -> None:
+    """Build (or rebuild) an EPUB from a Markdown file — the reverse of `convert --markdown-out`."""
+    from .buildmd import BuildError, run_build
+
+    out_path = output or markdown.with_suffix(".epub")
+    opts = PipelineOptions(
+        split_every=split_every, split_volumes=split_volumes, font=font, preshape=preshape,
+    )
+    warnings: list[str] = []
+    try:
+        result = run_build(markdown, out_path, opts, cli_title=title, cli_author=author,
+                           cli_language=language, on_warning=warnings.append)
+    except BuildError as exc:
+        console.print(f"[red]Error:[/red] {exc}")
+        raise typer.Exit(1)
+
+    for warning in warnings:
+        console.print(f"[yellow]تحذير — warning:[/yellow] {warning}")
+    console.print()
+    for out in result.outputs:
+        size_mb = out.stat().st_size / 1024 / 1024
+        console.print(f"  [green]✔[/green] {out}  ({size_mb:.1f} MB)")
 
 
 @app.command()

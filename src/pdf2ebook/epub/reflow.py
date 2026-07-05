@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import re
 import uuid
 from pathlib import Path
 from xml.sax.saxutils import escape
@@ -17,29 +18,65 @@ from .zipwriter import EpubContainer
 MAX_EMBED_HEIGHT = 1024
 JPEG_QUALITY = 70
 
+_NOTEREF_RE = re.compile(r"\[\^([^\]\s]+)\]")
+_ARABIC_DIGITS = "٠١٢٣٤٥٦٧٨٩"
 
-def _chapter_xhtml(chapter: Chapter, work_root: Path, image_names: dict[int, str]) -> str:
+
+def _num(n: int, language: str) -> str:
+    if language.startswith("ar"):
+        return "".join(_ARABIC_DIGITS[int(d)] for d in str(n))
+    return str(n)
+
+
+def _chapter_xhtml(chapter: Chapter, work_root: Path, image_names: dict[int, str],
+                   language: str = "ar") -> str:
+    # Footnotes render together at the chapter end; number them in order and map
+    # each note id → its display number so inline refs resolve.
+    notes = [el for el in chapter.elements
+             if isinstance(el, Paragraph) and el.kind == "footnote"]
+    note_order = {n.note_id: k for k, n in enumerate(notes, start=1) if n.note_id}
+    body = [el for el in chapter.elements
+            if not (isinstance(el, Paragraph) and el.kind == "footnote")]
+    referenced: set[str] = set()   # notes with at least one body ref (→ backlink)
+    ref_ided: set[str] = set()     # notes that already own the ref-fn-{id} anchor
+
+    def render_text(text: str) -> str:
+        def repl(m: re.Match) -> str:
+            nid = m.group(1)
+            if nid not in note_order:
+                return ""  # ref with no matching note in this chapter → drop marker
+            referenced.add(nid)
+            num = _num(note_order[nid], language)
+            # Only the first citation of a note carries the id, so a note cited
+            # more than once (hand-edited Markdown) never emits a duplicate id.
+            if nid in ref_ided:
+                return (f'<a epub:type="noteref" class="noteref" '
+                        f'href="#fn-{nid}"><sup>{num}</sup></a>')
+            ref_ided.add(nid)
+            return (f'<a epub:type="noteref" class="noteref" href="#fn-{nid}" '
+                    f'id="ref-fn-{nid}"><sup>{num}</sup></a>')
+        return _NOTEREF_RE.sub(repl, escape(text))
+
     parts: list[str] = []
-    els = chapter.elements
-    n = len(els)
+    n = len(body)
     i = 0
     while i < n:
-        el = els[i]
+        el = body[i]
         if isinstance(el, Paragraph):
             if el.kind in ("ul", "ol"):
                 tag = el.kind
                 items: list[str] = []
-                while i < n and isinstance(els[i], Paragraph) and els[i].kind == tag:
-                    items.append(f"<li>{escape(els[i].text)}</li>")
+                while i < n and isinstance(body[i], Paragraph) and body[i].kind == tag:
+                    items.append(f"<li>{render_text(body[i].text)}</li>")
                     i += 1
                 parts.append(f"    <{tag}>{''.join(items)}</{tag}>")
                 continue
             if el.kind in ("h1", "h2", "h3"):
-                parts.append(f"    <{el.kind}>{escape(el.text)}</{el.kind}>")
+                parts.append(f"    <{el.kind}>{render_text(el.text)}</{el.kind}>")
             elif el.kind in ("verse", "quran"):
-                parts.append(f'    <p class="{el.kind}">{escape(el.text)}</p>')
+                parts.append(f'    <p class="{el.kind}">{render_text(el.text)}</p>')
             else:
-                parts.append(f"    <p>{escape(el.text)}</p>")
+                parts.append(f"    <p>{render_text(el.text)}</p>")
         elif isinstance(el, PageImage):
             name = image_names[el.page_no]
             parts.append(
@@ -47,6 +84,23 @@ def _chapter_xhtml(chapter: Chapter, work_root: Path, image_names: dict[int, str
                 f"<figcaption>صفحة {el.page_no + 1}</figcaption></figure>"
             )
         i += 1
+
+    if notes:
+        parts.append('    <div class="footnotes"><hr/>')
+        for ordinal, note in enumerate(notes, start=1):
+            nid = note.note_id
+            num = _num(ordinal, language)
+            # Backlink only when a body ref actually points here.
+            if nid and nid in referenced:
+                label = f'<a href="#ref-fn-{nid}" epub:type="backlink">{num}.</a>'
+            else:
+                label = f"{num}."
+            fid = f' id="fn-{nid}"' if nid else ""
+            parts.append(
+                f'      <aside epub:type="footnote" class="footnote"{fid}>'
+                f"<p>{label} {render_text(note.text)}</p></aside>"
+            )
+        parts.append("    </div>")
     return "\n".join(parts)
 
 
@@ -115,7 +169,7 @@ def build_reflow_epub(
 
         for i, chapter in enumerate(book.chapters):
             name = f"text/chap_{i + 1:03d}.xhtml"
-            body = _chapter_xhtml(chapter, work_root, image_names)
+            body = _chapter_xhtml(chapter, work_root, image_names, book.language)
             heading = f"    <h2>{escape(chapter.title)}</h2>\n" if chapter.title else ""
             first = chapter.elements[0] if chapter.elements else None
             starts_with_heading = isinstance(first, Paragraph) and first.kind in ("h1", "h2", "h3")

@@ -10,9 +10,12 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
 from PIL import Image
+
+if TYPE_CHECKING:
+    from .report import ConversionReport
 
 from .cbz import write_cbz
 from .config import PipelineOptions, parse_page_range
@@ -35,6 +38,7 @@ class ConversionResult:
     pages_image_fallback: int = 0
     stripped_lines: list[str] = field(default_factory=list)
     mean_confidences: list[float] = field(default_factory=list)
+    report: "ConversionReport | None" = None
 
 
 def default_work_dir(pdf_path: Path) -> Path:

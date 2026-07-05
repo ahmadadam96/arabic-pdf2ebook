@@ -21,6 +21,12 @@ li { margin: 0 0 0.2em 0; }
 figure.scan { margin: 0.5em 0; page-break-inside: avoid; text-align: center; }
 figure.scan img { max-width: 100%; }
 figure.scan figcaption { font-size: 0.8em; color: #555; }
+a.noteref { text-decoration: none; }
+a.noteref sup { padding: 0 0.15em; }
+div.footnotes { margin-top: 1.2em; font-size: 0.85em; }
+div.footnotes hr { border: 0; border-top: 1px solid #999; width: 30%; margin-inline-start: 0; }
+aside.footnote { margin: 0 0 0.3em 0; }
+aside.footnote p { text-indent: 0; margin: 0; }
 """
 
 IMAGE_CSS = """\

@@ -96,6 +96,7 @@
     <button id="go" disabled>ابدأ التحويل — Convert</button>
     <progress id="bar" max="1" value="0" hidden></progress>
     <div id="status"></div>
+    <div id="report-warn" class="warn"></div>
     <div id="outputs"></div>
 
     <div id="send-box" hidden>
@@ -204,8 +205,19 @@ async function poll() {
   let summary = '✅ تم التحويل — Done!';
   if (job.stats && job.stats.pages_total) {
     summary += ` (${job.stats.pages_total} صفحة: ${job.stats.pages_direct_text || 0} نص مباشر، ${job.stats.pages_ocr || 0} OCR، ${job.stats.pages_image_fallback || 0} صور)`;
+    if (typeof job.stats.coverage === 'number') {
+      summary += ` — تغطية النص ${Math.round(job.stats.coverage * 100)}% coverage`;
+    }
   }
   statusEl.textContent = summary;
+  const warnEl = document.getElementById('report-warn');
+  const warnings = (job.stats && job.stats.warnings) || [];
+  if (warnings.length) {
+    warnEl.innerHTML = warnings.map(w => w.replace(/</g, '&lt;')).join('<br>');
+    warnEl.style.display = 'block';
+  } else {
+    warnEl.style.display = 'none';
+  }
   outputsEl.innerHTML = job.outputs.map(o =>
     `<a href="/api/download/${jobId}/${o.index}" download>⬇ ${o.name} (${(o.size / 1048576).toFixed(1)} MB)</a>`
   ).join('');

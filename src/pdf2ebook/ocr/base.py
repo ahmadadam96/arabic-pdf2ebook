@@ -21,6 +21,7 @@ class OcrLine:
     words: list[OcrWord] = field(default_factory=list)
     bbox: tuple[int, int, int, int] = (0, 0, 0, 0)
     size: float = 0.0  # font size signal (points) from a text layer; 0.0 = unknown (OCR)
+    bold: float = 0.0  # fraction of bold chars from a text layer; 0.0 = unknown (OCR)
 
     @property
     def text(self) -> str:
@@ -62,6 +63,7 @@ class OcrPage:
                 words=[OcrWord(w["text"], w["conf"], tuple(w["bbox"])) for w in ln["words"]],
                 bbox=tuple(ln["bbox"]),
                 size=ln.get("size", 0.0),
+                bold=ln.get("bold", 0.0),
             )
             for ln in data["lines"]
         ]
