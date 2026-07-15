@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import xml.dom.minidom
 import zipfile
 
@@ -255,8 +256,9 @@ def test_split_footnote_ref_resolves_in_epub(tmp_path):
     build_reflow_epub(book, out, tmp_path, font_files=[])
     chap = zipfile.ZipFile(out).read("OEBPS/text/chap_001.xhtml").decode("utf-8")
     assert "<sup>111</sup>" not in chap        # no fabricated page+ordinal number
-    assert 'href="#fn-p1-1"' in chap           # ref resolves
-    assert 'id="fn-p1-1"' in chap              # aside relocated into this chapter
+    target = re.search(r'href="#(fn-[a-f0-9]+)"', chap)
+    assert target is not None                    # ref resolves
+    assert f'id="{target.group(1)}"' in chap    # aside relocated into this chapter
     assert 'epub:type="backlink"' in chap
     xml.dom.minidom.parseString(chap)
 
@@ -270,9 +272,32 @@ def test_note_cited_twice_has_no_duplicate_id(tmp_path):
     out = tmp_path / "dup.epub"
     build_reflow_epub(Book(title="ك", chapters=[chapter]), out, tmp_path, font_files=[])
     chap = zipfile.ZipFile(out).read("OEBPS/text/chap_001.xhtml").decode("utf-8")
-    assert chap.count('id="ref-fn-p1-1"') == 1   # only the first citation owns the id
-    assert chap.count('href="#fn-p1-1"') == 2     # both citations link to the note
+    assert chap.count('id="ref-fn-') == 1         # only the first citation owns the id
+    assert chap.count('href="#fn-') == 2           # both citations link to the note
     xml.dom.minidom.parseString(chap)             # valid XHTML: no duplicate id
+
+
+def test_unsafe_markdown_footnote_id_generates_safe_xhtml_anchors(tmp_path):
+    unsafe_id = 'a&<b>"c'
+    md = "\n".join([
+        emit_page_break(0),
+        f"متن [^{unsafe_id}] ثم [^{unsafe_id}]",
+        f"[^{unsafe_id}]: نص الحاشية",
+    ])
+    book = markdown_to_book(md, title="ك", author="", language="ar", split_every=10)
+    note = next(
+        p for ch in book.chapters for p in ch.elements
+        if isinstance(p, Paragraph) and p.kind == "footnote"
+    )
+    assert note.note_id == unsafe_id
+
+    out = tmp_path / "unsafe-id.epub"
+    build_reflow_epub(book, out, tmp_path, font_files=[])
+    chap = zipfile.ZipFile(out).read("OEBPS/text/chap_001.xhtml").decode("utf-8")
+    assert unsafe_id not in chap
+    assert chap.count('href="#fn-') == 2
+    assert chap.count('id="ref-fn-') == 1
+    xml.dom.minidom.parseString(chap)
 
 
 def test_unknown_footnote_ref_drops_marker(tmp_path):
@@ -296,10 +321,10 @@ def test_footnotes_render_in_epub(tmp_path):
     out = tmp_path / "book.epub"
     build_reflow_epub(book, out, tmp_path, font_files=[])
     chap = zipfile.ZipFile(out).read("OEBPS/text/chap_001.xhtml").decode("utf-8")
-    assert 'epub:type="noteref"' in chap and 'href="#fn-p1-1"' in chap
-    assert 'epub:type="footnote"' in chap and 'id="fn-p1-1"' in chap
+    assert 'epub:type="noteref"' in chap and 'href="#fn-' in chap
+    assert 'epub:type="footnote"' in chap and 'id="fn-' in chap
     assert 'epub:type="backlink"' in chap        # matched note is back-linked
-    assert 'id="fn-p1-9"' in chap                # unmatched note still rendered
+    assert chap.count('id="fn-') == 2             # unmatched note still rendered
     xml.dom.minidom.parseString(chap)            # well-formed XHTML
 
 

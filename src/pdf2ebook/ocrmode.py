@@ -1,7 +1,7 @@
 """OCR / auto mode: scanned pages → recognized text → reflowable RTL EPUB.
 
 Per-page decision tree (auto mode):
-    1. real PDF text layer (> TEXT_LAYER_MIN_CHARS, healthy) → use it directly
+    1. real PDF text layer (> TEXT_LAYER_SHORT_MIN_CHARS, healthy) → use it directly
     2. page looks like a photo/map                  → keep as cleaned image
     3. OCR; low-confidence pages get a rescue pass  → text
     4. still below --min-conf                       → keep as cleaned image
@@ -27,7 +27,8 @@ from .epub.reflow import build_reflow_epub
 from .ocr.base import OcrPage
 from .ocr.registry import get_backend
 from .pdfio import PdfRasterizer
-from .pipeline import ConversionResult, Progress, default_title, default_work_dir, extract_pages
+from .pipeline import (ConversionResult, Progress, default_title, default_work_dir,
+                       ensure_output_outside_workdir, extract_pages, file_fingerprints)
 from .preprocess import ops
 from .preprocess.pipeline import detect_image_page, preprocess_for_image, preprocess_for_ocr
 from .report import (ROUTE_BLANK, ROUTE_IMAGE, ROUTE_OCR, ROUTE_RESCUED, ROUTE_TEXT,
@@ -40,6 +41,7 @@ from .textproc.structure import structure_page
 from .workdir import WorkDir
 
 TEXT_LAYER_MIN_CHARS = 200
+TEXT_LAYER_SHORT_MIN_CHARS = 20
 MIN_WORDS_PER_PAGE = 15
 SCAN_MAX_HEIGHT = 1400
 BAD_GLYPH_MAX = 0.05  # per page: above this share of U+FFFD/PUA chars → OCR instead
@@ -70,7 +72,7 @@ class PageData:
 
 def preprocess_ocr_pages(work: WorkDir, raw_paths: list[Path], force: bool = False,
                          progress: Progress | None = None) -> dict[str, Path]:
-    settings = {"v": 1}
+    settings = {"raw": file_fingerprints(raw_paths), "v": 2}
     if force:
         work.invalidate("pre-ocr")
     work.begin_stage("pre-ocr", settings)
@@ -171,21 +173,19 @@ def _select_text_layer(samples: dict[int, str],
 
     Returns (allowed page indices, {excluded index: reason}).
     - 'always': keep every sampled page (no gating).
-    - otherwise: a book-level corruption gate (lam-alef ligature loss) can discard
-      the whole layer, and a per-page bad-glyph gate (legacy non-Unicode fonts)
-      drops individual pages to OCR while keeping the healthy ones.
+    - otherwise: per-page corruption and bad-glyph gates drop bad pages to OCR
+      while keeping healthy pages, including sparse heading/front-matter pages.
     """
     if not samples:
         return set(), {}
     if text_layer_opt == "always":
         return set(samples), {}
-    joined = "\n".join(list(samples.values())[:10])
-    if clean.looks_corrupted_arabic(joined):
-        reason = "text layer corrupted (ligature loss) — العتاد النصي تالف، سيُستخدم OCR"
-        return set(), {idx: reason for idx in samples}
     allowed: set[int] = set()
     excluded: dict[int, str] = {}
     for idx, text in samples.items():
+        if clean.looks_corrupted_arabic(text):
+            excluded[idx] = "text layer corrupted (ligature loss) — العتاد النصي تالف، سيُستخدم OCR"
+            continue
         ratio = clean.bad_glyph_ratio(text)
         if ratio > BAD_GLYPH_MAX:
             excluded[idx] = f"bad glyphs {ratio:.0%} (non-Unicode font) — خط غير قياسي، سيُستخدم OCR"
@@ -289,6 +289,7 @@ def run_text_mode(
 ) -> ConversionResult:
     result = ConversionResult()
     work = WorkDir(opts.work_dir or default_work_dir(pdf_path), pdf_path)
+    ensure_output_outside_workdir(out_path, work)
     extra_patterns = clean.compile_extra_patterns(opts.ocr.strip_patterns)
 
     with PdfRasterizer(pdf_path) as pdf:
@@ -310,7 +311,7 @@ def run_text_mode(
             samples: dict[int, str] = {}
             for idx in indices:
                 stripped = pdf.extract_text(idx).strip()
-                if len(stripped) >= TEXT_LAYER_MIN_CHARS:
+                if len(stripped) >= TEXT_LAYER_SHORT_MIN_CHARS:
                     samples[idx] = stripped
             allowed, text_layer_reasons = _select_text_layer(samples, opts.text_layer)
             for idx in allowed:
@@ -332,8 +333,14 @@ def run_text_mode(
     backend = None
     pages_data: list[PageData] = []
     ocr_stage = f"ocr-{opts.ocr.engine}"
-    ocr_settings = {"engine": opts.ocr.engine, "lang": opts.ocr.lang,
-                    "psm": opts.ocr.psm, "rescue": opts.ocr.rescue, "v": 1}
+    ocr_settings = {
+        "engine": opts.ocr.engine,
+        "lang": opts.ocr.lang,
+        "psm": opts.ocr.psm,
+        "rescue": opts.ocr.rescue,
+        "pre": file_fingerprints(list(pre_paths.values())),
+        "v": 2,
+    }
     if opts.force in ("ocr", "all"):
         work.invalidate(ocr_stage)
     work.begin_stage(ocr_stage, ocr_settings)
@@ -546,7 +553,12 @@ def resolve_fonts(choice: str) -> list[Path]:
     fonts_dir = Path(__file__).parent / "fonts"
     mapping = {
         "amiri": ["Amiri-Regular.ttf"],
-        "scheherazade": ["ScheherazadeNew-Regular.ttf"],
     }
-    files = [fonts_dir / name for name in mapping.get(choice, [])]
-    return [f for f in files if f.exists()]
+    if choice not in mapping:
+        valid = ", ".join(["amiri", "none"])
+        raise ValueError(f"font must be one of: {valid}")
+    files = [fonts_dir / name for name in mapping[choice]]
+    missing = [f.name for f in files if not f.exists()]
+    if missing:
+        raise ValueError(f"Requested font asset missing: {', '.join(missing)}")
+    return files

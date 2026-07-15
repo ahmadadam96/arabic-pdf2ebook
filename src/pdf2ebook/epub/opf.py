@@ -2,10 +2,20 @@
 
 from __future__ import annotations
 
+import re
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from xml.sax.saxutils import escape
+
+
+_LANGUAGE_TAG_RE = re.compile(r"^[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*$")
+
+
+def safe_language_tag(language: str) -> str:
+    """Return a conservative, safe BCP-47-like tag for EPUB metadata."""
+    language = language.strip()
+    return language if _LANGUAGE_TAG_RE.fullmatch(language) else "und"
 
 
 @dataclass(frozen=True)
@@ -28,6 +38,7 @@ def build_opf(
     cover_id: str | None = None,
 ) -> str:
     book_id = book_id or f"urn:uuid:{uuid.uuid4()}"
+    language = safe_language_tag(language)
     modified = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     meta_extra = ""
@@ -55,12 +66,12 @@ def build_opf(
     )
 
     return f"""<?xml version="1.0" encoding="UTF-8"?>
-<package version="3.0" unique-identifier="bookid" xml:lang="{language}" dir="rtl"
+<package version="3.0" unique-identifier="bookid" xml:lang="{escape(language)}" dir="rtl"
          xmlns="http://www.idpf.org/2007/opf" prefix="rendition: http://www.idpf.org/vocab/rendition/#">
   <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
     <dc:identifier id="bookid">{escape(book_id)}</dc:identifier>
     <dc:title>{escape(title)}</dc:title>
-    <dc:language>{language}</dc:language>
+    <dc:language>{escape(language)}</dc:language>
 {author_xml}    <meta property="dcterms:modified">{modified}</meta>
 {meta_extra}  </metadata>
   <manifest>
@@ -75,13 +86,14 @@ def build_opf(
 
 def build_nav(title: str, language: str, toc: list[tuple[str, str]]) -> str:
     """EPUB 3 navigation document. toc = [(label, href), ...]"""
+    language = safe_language_tag(language)
     entries = "\n".join(
         f'        <li><a href="{escape(href)}">{escape(label)}</a></li>' for label, href in toc
     )
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE html>
 <html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"
-      lang="{language}" xml:lang="{language}" dir="rtl">
+      lang="{escape(language)}" xml:lang="{escape(language)}" dir="rtl">
   <head>
     <title>{escape(title)}</title>
     <meta charset="utf-8"/>

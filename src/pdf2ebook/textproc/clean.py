@@ -103,15 +103,23 @@ def compile_extra_patterns(patterns: list[str]) -> list[re.Pattern]:
 
 
 _ARABIC_LETTER_RE = re.compile(r"[ء-ي٠-٩]")
-_ARABIC_ONLY_RE = re.compile(r"[ء-ي]")
 
 
 def arabic_ratio(text: str) -> float:
-    """Share of Arabic letters among non-space characters."""
-    compact = re.sub(r"\s+", "", text)
-    if not compact:
-        return 0.0
-    return len(_ARABIC_ONLY_RE.findall(compact)) / len(compact)
+    """Share of Arabic letters among alphabetic characters.
+
+    Whitespace, punctuation, tatweel, and digits do not identify a script, so
+    they are excluded from both sides of the ratio.
+    """
+    letters = 0
+    arabic = 0
+    for char in text:
+        if char == TATWEEL or not char.isalpha():
+            continue
+        letters += 1
+        if "ARABIC" in unicodedata.name(char, ""):
+            arabic += 1
+    return arabic / letters if letters else 0.0
 
 
 # U+FFFD replacement char + Private Use Area (BMP + planes 15/16). A high share

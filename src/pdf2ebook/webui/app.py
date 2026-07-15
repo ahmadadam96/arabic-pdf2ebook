@@ -19,7 +19,7 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
 from .. import __version__
-from ..config import EpubMeta, ImageOptions, OcrOptions, PipelineOptions
+from ..config import EpubMeta, ImageOptions, OcrOptions, PipelineOptions, validate_pipeline_options
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -105,8 +105,6 @@ async def convert(
     preshape: bool = Form(False),
     footnotes: bool = Form(True),
 ) -> JSONResponse:
-    if mode not in ("auto", "ocr", "image"):
-        raise HTTPException(400, "mode must be auto, ocr or image")
     job_id = uuid.uuid4().hex[:12]
     job_root = jobs_dir() / job_id
     job_root.mkdir(parents=True)
@@ -122,6 +120,13 @@ async def convert(
         image=ImageOptions(device=device),
         meta=EpubMeta(),
     )
+    try:
+        validate_pipeline_options(opts)
+        from ..devices import get_profile
+
+        get_profile(device)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
     out_path = job_root / (pdf_path.stem + ".epub")
     job = Job(job_id=job_id, pdf_path=pdf_path)
     with JOBS_LOCK:

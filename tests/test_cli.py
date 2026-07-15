@@ -19,6 +19,14 @@ def _make_text_layer_pdf(path):
     _make_text_pdf(path, items)
 
 
+def _make_short_text_layer_pdf(path):
+    """Sparse text-layer page below the old 200-char gate."""
+    _make_text_pdf(path, [
+        ("Short Heading With Valid Text That Survives Edge Filtering", 72, 720, 20),
+        ("Brief body line with enough words to survive filtering.", 72, 680, 12),
+    ])
+
+
 def test_devices_lists_profiles():
     result = runner.invoke(app, ["devices"])
     assert result.exit_code == 0
@@ -29,6 +37,14 @@ def test_inspect_detects_scan(tiny_pdf):
     result = runner.invoke(app, ["inspect", str(tiny_pdf)])
     assert result.exit_code == 0
     assert "text layer: no" in result.output
+
+
+def test_inspect_reports_short_text_layer_as_usable(tmp_path):
+    pdf = tmp_path / "short.pdf"
+    _make_short_text_layer_pdf(pdf)
+    result = runner.invoke(app, ["inspect", str(pdf)])
+    assert result.exit_code == 0, result.output
+    assert "text layer: yes, usable" in result.output
 
 
 def test_convert_image_mode_end_to_end(tiny_pdf, tmp_path):
@@ -47,6 +63,27 @@ def test_convert_image_mode_end_to_end(tiny_pdf, tmp_path):
 def test_convert_rejects_bad_mode(tiny_pdf):
     result = runner.invoke(app, ["convert", str(tiny_pdf), "--mode", "banana"])
     assert result.exit_code == 2
+
+
+def test_convert_rejects_bad_enum_options(tiny_pdf):
+    result = runner.invoke(app, ["convert", str(tiny_pdf), "--style", "sepia"])
+    assert result.exit_code == 2
+    assert "Invalid option" in result.output
+
+    result = runner.invoke(app, ["convert", str(tiny_pdf), "--mode", "image", "--device", "missing"])
+    assert result.exit_code == 2
+    assert "device" in result.output
+
+
+def test_convert_rejects_output_inside_cleaned_workdir(tiny_pdf, tmp_path):
+    wd = tmp_path / "wd"
+    out = wd / "out.epub"
+    result = runner.invoke(app, [
+        "convert", str(tiny_pdf), str(out), "--mode", "image",
+        "--work-dir", str(wd), "--clean",
+    ])
+    assert result.exit_code == 1
+    assert "Output path" in result.output
 
 
 def test_convert_empty_pdf_fails_cleanly(tmp_path):
@@ -101,6 +138,24 @@ def test_convert_markdown_out_then_build(tmp_path):
     assert zipfile.ZipFile(rebuilt).read("mimetype") == b"application/epub+zip"
 
 
+def test_convert_short_text_layer_page_uses_direct_text(tmp_path):
+    pdf = tmp_path / "short.pdf"
+    _make_short_text_layer_pdf(pdf)
+    epub = tmp_path / "out.epub"
+    md = tmp_path / "out.md"
+    wd = tmp_path / "wd"
+    result = runner.invoke(app, [
+        "convert", str(pdf), str(epub), "--markdown-out", str(md), "--work-dir", str(wd),
+    ])
+    assert result.exit_code == 0, result.output
+    assert "1 direct text" in result.output
+
+    import json
+    report = json.loads((wd / "text" / "report.json").read_text(encoding="utf-8"))
+    assert report["pages"][0]["route"] == "text-layer"
+    assert "Short Heading" in md.read_text(encoding="utf-8")
+
+
 def test_convert_warm_cache_rerun_still_reports(tmp_path):
     pdf = tmp_path / "text.pdf"
     _make_text_layer_pdf(pdf)
@@ -138,3 +193,7 @@ def test_parse_page_range():
     assert parse_page_range("5", 10) == [4]
     assert parse_page_range("1-2,9-10", 10) == [0, 1, 8, 9]
     assert parse_page_range(None, 3) == [0, 1, 2]
+    import pytest
+
+    with pytest.raises(ValueError):
+        parse_page_range(",", 10)

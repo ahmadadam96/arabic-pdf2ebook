@@ -15,6 +15,7 @@ from PIL import Image
 
 from .opf import ManifestItem, build_ncx, build_nav, build_opf
 from .templates import IMAGE_CSS, xhtml_page
+from .validate import validate_epub
 from .zipwriter import EpubContainer
 
 JPEG_QUALITY = 75
@@ -44,6 +45,9 @@ def build_image_epub(
     toc_every: int = 20,
     progress: Callable[[int], None] | None = None,
 ) -> Path:
+    if not page_paths:
+        raise ValueError("Cannot build an image EPUB without page images")
+
     pre_paginated = layout == "fixed"
     book_id = None
 
@@ -101,4 +105,5 @@ def build_image_epub(
                       pre_paginated=pre_paginated, viewport=viewport,
                       cover_id="img0001" if page_paths else None),
         )
+    validate_epub(out_path)
     return out_path

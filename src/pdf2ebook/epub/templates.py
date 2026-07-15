@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from xml.sax.saxutils import escape
 
+from .opf import safe_language_tag
+
 REFLOW_CSS = """\
 html { direction: rtl; }
 body {
@@ -45,13 +47,14 @@ FONT_FACE_CSS = """\
 
 def xhtml_page(title: str, body: str, language: str = "ar", css_href: str = "../styles/style.css",
                viewport: tuple[int, int] | None = None) -> str:
+    language = safe_language_tag(language)
     viewport_meta = ""
     if viewport:
         viewport_meta = f'    <meta name="viewport" content="width={viewport[0]}, height={viewport[1]}"/>\n'
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE html>
 <html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"
-      lang="{language}" xml:lang="{language}" dir="rtl">
+      lang="{escape(language)}" xml:lang="{escape(language)}" dir="rtl">
   <head>
     <title>{escape(title)}</title>
     <meta charset="utf-8"/>

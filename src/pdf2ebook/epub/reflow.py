@@ -13,6 +13,7 @@ from PIL import Image
 from ..book import Book, Chapter, PageImage, Paragraph
 from .opf import ManifestItem, build_ncx, build_nav, build_opf
 from .templates import FONT_FACE_CSS, REFLOW_CSS, xhtml_page
+from .validate import validate_epub
 from .zipwriter import EpubContainer
 
 MAX_EMBED_HEIGHT = 1024
@@ -34,7 +35,14 @@ def _chapter_xhtml(chapter: Chapter, work_root: Path, image_names: dict[int, str
     # each note id → its display number so inline refs resolve.
     notes = [el for el in chapter.elements
              if isinstance(el, Paragraph) and el.kind == "footnote"]
-    note_order = {n.note_id: k for k, n in enumerate(notes, start=1) if n.note_id}
+    note_order: dict[str, int] = {}
+    note_anchors: dict[str, str] = {}
+    for ordinal, note in enumerate(notes, start=1):
+        if note.note_id and note.note_id not in note_order:
+            note_order[note.note_id] = ordinal
+            # Hex is an injective UTF-8 encoding, so user-provided Markdown IDs
+            # never become XHTML attribute syntax and distinct IDs cannot collide.
+            note_anchors[note.note_id] = f"fn-{note.note_id.encode('utf-8').hex()}"
     body = [el for el in chapter.elements
             if not (isinstance(el, Paragraph) and el.kind == "footnote")]
     referenced: set[str] = set()   # notes with at least one body ref (→ backlink)
@@ -47,15 +55,24 @@ def _chapter_xhtml(chapter: Chapter, work_root: Path, image_names: dict[int, str
                 return ""  # ref with no matching note in this chapter → drop marker
             referenced.add(nid)
             num = _num(note_order[nid], language)
+            anchor = note_anchors[nid]
             # Only the first citation of a note carries the id, so a note cited
             # more than once (hand-edited Markdown) never emits a duplicate id.
             if nid in ref_ided:
                 return (f'<a epub:type="noteref" class="noteref" '
-                        f'href="#fn-{nid}"><sup>{num}</sup></a>')
+                        f'href="#{anchor}"><sup>{num}</sup></a>')
             ref_ided.add(nid)
-            return (f'<a epub:type="noteref" class="noteref" href="#fn-{nid}" '
-                    f'id="ref-fn-{nid}"><sup>{num}</sup></a>')
-        return _NOTEREF_RE.sub(repl, escape(text))
+            return (f'<a epub:type="noteref" class="noteref" href="#{anchor}" '
+                    f'id="ref-{anchor}"><sup>{num}</sup></a>')
+
+        parts: list[str] = []
+        last = 0
+        for match in _NOTEREF_RE.finditer(text):
+            parts.append(escape(text[last:match.start()]))
+            parts.append(repl(match))
+            last = match.end()
+        parts.append(escape(text[last:]))
+        return "".join(parts)
 
     parts: list[str] = []
     n = len(body)
@@ -87,15 +104,22 @@ def _chapter_xhtml(chapter: Chapter, work_root: Path, image_names: dict[int, str
 
     if notes:
         parts.append('    <div class="footnotes"><hr/>')
+        note_instances: dict[str, int] = {}
         for ordinal, note in enumerate(notes, start=1):
             nid = note.note_id
             num = _num(ordinal, language)
+            anchor = ""
+            if nid:
+                note_instances[nid] = note_instances.get(nid, 0) + 1
+                anchor = note_anchors[nid]
+                if note_instances[nid] > 1:
+                    anchor = f"{anchor}-{note_instances[nid]}"
             # Backlink only when a body ref actually points here.
-            if nid and nid in referenced:
-                label = f'<a href="#ref-fn-{nid}" epub:type="backlink">{num}.</a>'
+            if nid and nid in referenced and note_instances[nid] == 1:
+                label = f'<a href="#ref-{anchor}" epub:type="backlink">{num}.</a>'
             else:
                 label = f"{num}."
-            fid = f' id="fn-{nid}"' if nid else ""
+            fid = f' id="{anchor}"' if anchor else ""
             parts.append(
                 f'      <aside epub:type="footnote" class="footnote"{fid}>'
                 f"<p>{label} {render_text(note.text)}</p></aside>"
@@ -187,4 +211,5 @@ def build_reflow_epub(
         epub.add("OEBPS/content.opf",
                  build_opf(book.title, book.author, book.language, items, spine_ids,
                            book_id=book_id, cover_id=cover_id))
+    validate_epub(out_path)
     return out_path

@@ -36,6 +36,17 @@ def test_split_footnotes_text_layer_with_wrapped_note():
     assert len(kept.lines) == 2               # only the body lines survive
 
 
+def test_split_footnotes_before_trailing_page_number():
+    page = OcrPage(page_no=0, size=(600, 800), lines=[
+        _line("متن الصفحة", y=100, size=12),
+        _line("(١) حاشية في أسفل الصفحة", y=650, size=9),
+        _line("- 12 -", y=740, size=12),
+    ])
+    kept, notes = split_footnotes(page, body_size=12.0)
+    assert notes == [Footnote(label="١", text="حاشية في أسفل الصفحة")]
+    assert [line.text for line in kept.lines] == ["متن الصفحة", "- 12 -"]
+
+
 # --- detection: OCR line heights ----------------------------------------------
 
 def test_split_footnotes_ocr_line_heights():

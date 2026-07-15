@@ -65,11 +65,17 @@ def test_clean_heading_fixes_ocr_defects():
     assert clean.clean_heading("بنو الأحمر") == "بنو الأحمر"
 
 
-def test_arabic_ratio_separates_arabic_from_latin_glyph_soup():
+def test_arabic_ratio_ignores_neutral_page_debris():
     assert clean.arabic_ratio("وكان المسلمون بالأندلس يستنجدون بسلاطين المغرب") > 0.8
+    punctuation_heavy = "الفصل الأول ............ — ١٢٣ / 45 ــــــ : المقدمة"
+    assert clean.arabic_ratio(punctuation_heavy) > 0.95
+
+
+def test_arabic_ratio_separates_arabic_from_foreign_and_mixed_text():
     assert clean.arabic_ratio("Histoire Critique de l'Inquisition d'Espagne 1923") < 0.2
-    mixed_garbage = "0ا 5ب8 ÷ل .. 7ك9 xx ها 3" * 5
-    assert clean.arabic_ratio(mixed_garbage) < 0.6
+    assert clean.arabic_ratio("Русский текст иностранной библиографии") < 0.2
+    mixed_bibliography = "الفصل الأول Arabic index المراجع bibliography"
+    assert 0.2 < clean.arabic_ratio(mixed_bibliography) < 0.65
 
 
 def test_looks_corrupted_arabic_detects_broken_lam_alef():

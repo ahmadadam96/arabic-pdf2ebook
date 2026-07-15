@@ -13,7 +13,7 @@ from rich.progress import (BarColumn, MofNCompleteColumn, Progress, SpinnerColum
 from rich.table import Table
 
 from . import __version__
-from .config import EpubMeta, ImageOptions, OcrOptions, PipelineOptions
+from .config import EpubMeta, ImageOptions, OcrOptions, PipelineOptions, validate_pipeline_options
 from .devices import DEFAULT_PROFILE, PROFILES
 from .pdfio import PdfError
 
@@ -71,7 +71,7 @@ def convert(
     layout: str = typer.Option("flow", help="Image EPUB layout: flow | fixed"),
     style: str = typer.Option("gray", help="Image tone: gray | binary"),
     cbz: bool = typer.Option(False, "--cbz", help="Also write a CBZ (image mode)"),
-    font: str = typer.Option("amiri", help="Embedded font: amiri | scheherazade | none"),
+    font: str = typer.Option("amiri", help="Embedded font: amiri | none"),
     preshape: bool = typer.Option(
         False, "--preshape",
         help="Bake Arabic letter-joining into the text (presentation forms). ONLY for simple "
@@ -95,10 +95,6 @@ def convert(
         help="Deprecated alias for --markdown-out."),
 ) -> None:
     """Convert a PDF book to EPUB."""
-    if mode not in ("auto", "ocr", "image"):
-        console.print(f"[red]Unknown mode '{mode}'. Use: auto, ocr or image.[/red]")
-        raise typer.Exit(2)
-
     opts = PipelineOptions(
         mode=mode, text_layer=text_layer, dpi=dpi, pages=pages, preshape=preshape,
         split_volumes=split_volumes, split_every=split_every,
@@ -110,6 +106,14 @@ def convert(
                            layout=layout, cbz=cbz),
         meta=EpubMeta(title=title or "", author=author or ""),
     )
+    try:
+        validate_pipeline_options(opts)
+        if opts.mode == "image" and device not in PROFILES:
+            valid = ", ".join(sorted(PROFILES))
+            raise ValueError(f"device must be one of: {valid}")
+    except ValueError as exc:
+        console.print(f"[red]Invalid option:[/red] {exc}")
+        raise typer.Exit(2)
     out_path = output or pdf.with_suffix(".epub")
 
     from . import pipeline
@@ -191,7 +195,7 @@ def build(
     language: Optional[str] = typer.Option(None, help="Language code (default: front matter, then 'ar')"),
     split_every: int = typer.Option(10, help="Chapter fallback: one chapter per N pages when no headings"),
     split_volumes: int = typer.Option(1, help="Split output into N EPUB volumes"),
-    font: str = typer.Option("amiri", help="Embedded font: amiri | scheherazade | none"),
+    font: str = typer.Option("amiri", help="Embedded font: amiri | none"),
     preshape: bool = typer.Option(
         False, "--preshape", help="Bake Arabic letter-joining (simple readers like CrossPoint only)"),
 ) -> None:
@@ -202,6 +206,11 @@ def build(
     opts = PipelineOptions(
         split_every=split_every, split_volumes=split_volumes, font=font, preshape=preshape,
     )
+    try:
+        validate_pipeline_options(opts)
+    except ValueError as exc:
+        console.print(f"[red]Invalid option:[/red] {exc}")
+        raise typer.Exit(2)
     warnings: list[str] = []
     try:
         result = run_build(markdown, out_path, opts, cli_title=title, cli_author=author,
@@ -249,8 +258,14 @@ def inspect(pdf: Path = typer.Argument(..., help="PDF file or folder of PDFs")) 
             continue
         console.print(f"[bold]{info['file']}[/bold]")
         console.print(f"  pages: {info['pages']}, page size: {info['page_size_pts']} pts")
-        console.print(f"  text layer: {'yes' if info['has_text_layer'] else 'no'} "
-                      f"(~{info['avg_sample_text_chars']} chars/page sampled)")
+        if info["has_text_layer"]:
+            state = "usable" if info.get("text_layer_usable") else "unhealthy"
+            console.print(
+                f"  text layer: yes, {state} "
+                f"(~{info['avg_sample_text_chars']} chars/page sampled)"
+            )
+        else:
+            console.print(f"  text layer: no (~{info['avg_sample_text_chars']} chars/page sampled)")
         console.print(f"  → {info['recommendation']}")
 
 

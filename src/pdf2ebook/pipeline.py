@@ -89,6 +89,19 @@ def _volume_path(out_path: Path, index: int, total: int) -> Path:
     return out_path.with_name(f"{out_path.stem} - {index + 1}{out_path.suffix}")
 
 
+def ensure_output_outside_workdir(out_path: Path, work: WorkDir) -> None:
+    if work.contains(out_path):
+        raise ValueError("Output path must not be inside the work dir, especially with --clean")
+
+
+def file_fingerprints(paths: list[Path]) -> list[list[int | str]]:
+    out: list[list[int | str]] = []
+    for path in paths:
+        stat = path.stat()
+        out.append([path.name, stat.st_size, stat.st_mtime_ns])
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Stage: rasterize PDF pages → raw/ PNGs
 # ---------------------------------------------------------------------------
@@ -101,7 +114,7 @@ def extract_pages(
     force: bool = False,
     progress: Progress | None = None,
 ) -> list[Path]:
-    settings = {"dpi": dpi, "pages": indices[:1] + indices[-1:] + [len(indices)]}
+    settings = {"dpi": dpi, "pages": indices, "v": 2}
     if force:
         work.invalidate("raw")
     work.begin_stage("raw", settings)
@@ -130,7 +143,13 @@ def preprocess_image_pages(
     force: bool = False,
     progress: Progress | None = None,
 ) -> list[Path]:
-    settings = {"width": width, "height": height, "style": style, "v": 1}
+    settings = {
+        "width": width,
+        "height": height,
+        "style": style,
+        "raw": file_fingerprints(raw_paths),
+        "v": 2,
+    }
     if force:
         work.invalidate("pre-image")
     work.begin_stage("pre-image", settings)
@@ -163,6 +182,7 @@ def run_image_mode(
     height = opts.image.height or profile.height
 
     work = WorkDir(opts.work_dir or default_work_dir(pdf_path), pdf_path)
+    ensure_output_outside_workdir(out_path, work)
     with PdfRasterizer(pdf_path) as pdf:
         indices = parse_page_range(opts.pages, pdf.page_count)
         result.pages_total = len(indices)
@@ -208,26 +228,44 @@ def run_image_mode(
 # ---------------------------------------------------------------------------
 
 def inspect_pdf(pdf_path: Path, sample_pages: int = 5) -> dict:
+    from .ocrmode import TEXT_LAYER_SHORT_MIN_CHARS, _select_text_layer
+
     with PdfRasterizer(pdf_path) as pdf:
         n = pdf.page_count
         sample = sorted({0, 2, 5, n // 2, n - 1} & set(range(n)))[:sample_pages]
-        text_chars = [len(pdf.extract_text(i).strip()) for i in sample]
+        text_samples: dict[int, str] = {}
+        text_chars = []
+        for i in sample:
+            text = pdf.extract_text(i).strip()
+            text_chars.append(len(text))
+            if len(text) >= TEXT_LAYER_SHORT_MIN_CHARS:
+                text_samples[i] = text
         w, h = pdf.page_size_pts(min(n // 2, n - 1))
         meta = pdf.metadata()
 
     avg_chars = sum(text_chars) / max(1, len(text_chars))
-    has_text_layer = avg_chars > 200
+    allowed, text_layer_reasons = _select_text_layer(text_samples, "auto")
+    has_text_layer = bool(text_samples)
+    text_layer_usable = bool(allowed)
+    if text_layer_usable:
+        recommendation = "Usable text layer found: '--mode auto' will extract it directly where healthy."
+    elif has_text_layer:
+        recommendation = (
+            "Text layer is missing or unhealthy: use '--mode auto' (OCR/image fallback) "
+            "or '--mode image'."
+        )
+    else:
+        recommendation = "Scanned book: use '--mode auto' (OCR) or '--mode image'."
+
     return {
         "file": pdf_path.name,
         "pages": n,
         "page_size_pts": (round(w), round(h)),
         "avg_sample_text_chars": round(avg_chars),
         "has_text_layer": has_text_layer,
+        "text_layer_usable": text_layer_usable,
+        "text_layer_reasons": text_layer_reasons,
         "title": meta.get("title", ""),
         "author": meta.get("author", ""),
-        "recommendation": (
-            "Text layer found: '--mode auto' will extract it directly (no OCR needed)."
-            if has_text_layer
-            else "Scanned book: use '--mode auto' (OCR) or '--mode image'."
-        ),
+        "recommendation": recommendation,
     }

@@ -46,4 +46,4 @@ def get_profile(key: str) -> DeviceProfile:
         return PROFILES[key]
     except KeyError:
         valid = ", ".join(sorted(PROFILES))
-        raise KeyError(f"Unknown device profile '{key}'. Valid profiles: {valid}") from None
+        raise ValueError(f"Unknown device profile '{key}'. Valid profiles: {valid}") from None

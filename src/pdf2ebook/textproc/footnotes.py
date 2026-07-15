@@ -26,6 +26,7 @@ MARKER_RE = re.compile(
     r"|([0-9٠-٩]{1,3})\s*[-–.)]"
     r"|([¹²³⁰-⁹]{1,3}))\s+"
 )
+PAGE_NUMBER_RE = re.compile(r"^\s*[-–—(\[]?\s*[0-9٠-٩]{1,4}\s*[-–—)\]]?\s*$")
 
 ZONE_TOP = 0.55          # a footnote block lives in the bottom 45% of the page
 SIZE_RATIO_MAX = 0.85    # text layer: line size vs body_size
@@ -51,6 +52,11 @@ def _is_small(line: OcrLine, body_size: float, med_height: float) -> bool:
     return med_height > 0 and line.bbox[3] <= med_height * HEIGHT_RATIO_MAX
 
 
+def _is_bottom_page_number(line: OcrLine, zone_y: float) -> bool:
+    """Whether a page-number footer can be ignored while locating notes."""
+    return line.bbox[1] >= zone_y and bool(PAGE_NUMBER_RE.match(line.text))
+
+
 def split_footnotes(page: OcrPage, body_size: float) -> tuple[OcrPage, list[Footnote]]:
     """Return (page without its footnote block, notes) — ([]) when none found."""
     visible = [ln for ln in page.lines if ln.text.strip()]
@@ -60,21 +66,28 @@ def split_footnotes(page: OcrPage, body_size: float) -> tuple[OcrPage, list[Foot
     med_height = median(ln.bbox[3] for ln in visible) or 1
     zone_y = page_h * ZONE_TOP
 
+    # Page numbers sit below some footnote blocks. Exclude a trailing page-number
+    # suffix only while detecting notes, then retain it for structure_page's
+    # ordinary edge-line filtering.
+    end = len(visible)
+    while end and _is_bottom_page_number(visible[end - 1], zone_y):
+        end -= 1
+
     # Maximal trailing run of small lines sitting in the bottom zone.
-    start = len(visible)
-    for i in range(len(visible) - 1, -1, -1):
+    start = end
+    for i in range(end - 1, -1, -1):
         ln = visible[i]
         if ln.bbox[1] < zone_y or not _is_small(ln, body_size, med_height):
             break
         start = i
-    if start >= len(visible):
+    if start >= end:
         return page, []
     # The block must begin (topmost line) with a footnote marker.
     if not MARKER_RE.match(visible[start].text):
         return page, []
 
     notes: list[Footnote] = []
-    for ln in visible[start:]:
+    for ln in visible[start:end]:
         m = MARKER_RE.match(ln.text)
         if m:
             label = next((g for g in m.groups() if g), "")
@@ -86,7 +99,7 @@ def split_footnotes(page: OcrPage, body_size: float) -> tuple[OcrPage, list[Foot
     if not notes:
         return page, []
 
-    kept = OcrPage(page_no=page.page_no, size=page.size, lines=visible[:start])
+    kept = OcrPage(page_no=page.page_no, size=page.size, lines=visible[:start] + visible[end:])
     return kept, notes
 
 

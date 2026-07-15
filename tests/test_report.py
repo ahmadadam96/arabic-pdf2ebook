@@ -77,6 +77,14 @@ def test_select_text_layer_corruption_discards_whole_layer():
     assert set(reasons) == {0, 1}
 
 
+def test_select_text_layer_drops_only_corrupted_pages():
+    healthy = "نص عربي سليم وواضح في صفحة قصيرة لكنها صالحة"
+    corrupted = "وأنت الخر ل شيء بعدك وأنت الفردا ل شريك لك السإلمية يا واهب العقول " * 10
+    allowed, reasons = _select_text_layer({0: healthy, 1: corrupted}, "auto")
+    assert allowed == {0}
+    assert set(reasons) == {1}
+
+
 # --- coverage counting ---------------------------------------------------------
 
 def test_coverage_key_strips_space_and_diacritics():
