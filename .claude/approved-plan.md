@@ -1,116 +1,105 @@
-# Plan: Arabic on CrossPoint (Xteink X4) — pre-shaped text + custom SD font
+# Adopt pdfmarkdown.app's proven techniques for clearer Arabic PDF → EPUB conversion
 
 ## Context
 
-The user's text-mode EPUBs show **boxes and symbols** on their Xteink X4 running CrossPoint.
-Root cause (confirmed from CrossPoint's own discussions #1757/#1693): the firmware's built-in
-fonts contain **no Arabic glyphs**, and Arabic **shaping** (contextual letter joining) is not
-implemented yet; RTL line rendering is "pretty much done" upstream but unreleased. The EPUB
-itself is correct (renders fine in Calibre/phone apps). CrossPoint supports **custom SD-card
-fonts**: a TTF uploaded through its web admin is converted to its bitmap format.
+The user asked to research how https://pdfmarkdown.app/ works under the hood and implement/refine its approach in this project (`arabic-pdf2ebook`) to make Arabic PDF conversion easier and clearer.
 
-User decision: pursue the **custom SD font + pre-shaping** experiment — our tool will offer an
-opt-in mode that bakes the letter-joining into the text itself (Arabic Presentation Forms,
-U+FB50–FEFF), so a renderer that just draws glyphs can still show connected Arabic once it has
-a font containing those glyphs. Amiri (already bundled at `src/pdf2ebook/fonts/Amiri-Regular.ttf`)
-maps the presentation-form codepoints, so it's the font to upload to the reader.
+**Research findings (reverse-engineered from its client-side JS bundles — closed-source, runs fully in-browser):** pdf.js extraction → **difficulty triage** (`badGlyphRatio`: pages whose text layer is ≥50% U+FFFD/private-use chars → broken ToUnicode → OCR; image-only pages → OCR) → in-browser OCR (PaddleOCR v5/ONNX with rotation retries) → **two Markdown builders** (PDF tagged structure tree when usable, else heuristics: font-size + bold-ratio headings, repeated header/footer stripping, footnotes as `[^n]`) → **coverage safety net** (if <95% of source text survived, fall back to the other builder) → **honest output** (stats, warnings, per-block provenance). Notably it has *no* Arabic/RTL handling — we already exceed it there.
 
-## The self-service user journey (what the README must teach)
+**Where we stand:** commit `2bb154b` already replicated the core (unified geometry-rich `OcrPage` → shared structurer → in-memory Markdown pivot → EPUB). This plan adds the four missing pieces (user confirmed all four):
 
-Guiding requirement from the user: **no human assistance in the loop** — anyone on the
-internet installs the program and the README shows them the complete path. The program
-ships the font ready-made; users never run font-conversion tooling.
+- **A. Markdown as a first-class user-facing format** — export the clean `.md`, hand-correct, rebuild the EPUB (`pdf2ebook build`) — pdfmarkdown.app's actual product.
+- **B. Triage + honest conversion report** — script-agnostic bad-glyph gate, per-page routing reasons, text-coverage guard, report in CLI/web/JSON.
+- **C. Footnotes** — missing entirely today; scholarly Arabic books need them. We have per-line font sizes on both paths → detect small bottom blocks with (١) markers → EPUB popup footnotes.
+- **D. Bold-ratio heading signal** — Arabic has no capitalization; per-char font weight from pdfium makes heading detection robust on uniform-size PDFs.
 
-The documented journey for a CrossPoint (Xteink X4) owner becomes:
+**Constraints:** no new runtime deps (CI license gate; stdlib only), never call pdfmarkdown.app, keep Markdown round-trip parity tests green, respect workdir resume, bilingual (ar/en) user-facing messages per existing style.
 
-```
-1. pdf2ebook convert "كتابي.pdf" --preshape          # book with pre-joined letters
-2. Turn on Wi-Fi transfer on the reader (it shows an address like 192.168.1.50)
-3. pdf2ebook fonts install --host 192.168.1.50       # one-time: Arabic font → reader
-   pdf2ebook send "كتابي.epub" --host 192.168.1.50   # the book itself
-4. On the reader: Settings → Reader → Font Family → Amiri. Open the book.
-```
+**Verified corrections to build on:**
+- `headings.py:66` gate is `(big and centered) or (keyword and centered) or (keyword and big)` — bold becomes a fourth self-sufficient `or` arm.
+- **Bug to fix in A:** `ocrmode._make_scan_image` returns `str(dest.relative_to(work.root))` → `scans\page_0002.png` on Windows; must be `.as_posix()` for portable `.md`.
+- `OcrPage.from_json` ignores unknown JSON keys → cache-compatible extensions (B's rescue flag, D's `bold`).
+- CI has no Tesseract — new e2e tests must use text-layer PDFs (`_make_text_pdf` in `tests/test_pdfio_geometry.py`) or prebuilt Markdown.
+- `pypdfium2` raw bindings expose `FPDFText_GetFontWeight` / `FPDFText_GetFontInfo` (verified on this machine).
 
-(Equivalent buttons exist in the web page, and `pdf2ebook fonts export` covers USB/manual
-copy and other devices like Kobo.) Removing the font later = deleting the files from
-`/.fonts/` on the SD card; nothing is flashed, fully reversible.
+---
 
-To make step 3 possible without any user-side tooling, the **build process** (not the user)
-pre-converts the bundled `Amiri-Regular.ttf` to CrossPoint's `.cpfont` format once — using
-CrossPoint's own `fontconvert_sdcard.py` with Unicode intervals covering Latin + Arabic
-(0600–06FF) + **Arabic Presentation Forms (FB50–FDFF, FE70–FEFF)** at sizes 12,14,16,18 —
-and the results are committed to the repo so they ship inside the pip package and the .exe.
+## Phase A — Markdown export + `build` command
 
-## Changes
+**Files:** `config.py`, `textproc/markdownize.py`, `ocrmode.py`, `cli.py`, new `src/pdf2ebook/buildmd.py`.
 
-1. **Pre-shaping option** (off by default — proper readers like Kobo/Apple must keep normal text):
-   - Add dependency `arabic-reshaper` (MIT, pure Python) in `pyproject.toml`.
-   - New `preshape: bool = False` on `PipelineOptions` (`src/pdf2ebook/config.py`).
-   - In `src/pdf2ebook/ocrmode.py` `run_text_mode`: when `opts.preshape`, transform every
-     element text AND chapter titles through `arabic_reshaper.reshape()` just before the Book
-     is built (after all cleanup — reshaping is the final transform). No bidi visual
-     reordering (it breaks reflowable line wrapping; CrossPoint's upcoming RTL handles direction).
-   - CLI: `--preshape` flag on `convert` (`src/pdf2ebook/cli.py`), help text explaining it's
-     for simple readers (CrossPoint) only.
-   - Web UI: checkbox in `src/pdf2ebook/webui/static/index.html` ("توافق CrossPoint — pre-join
-     letters for simple readers") posted as a form field; plumb through `webui/app.py`.
-   - Note in `xteink-x4` profile notes (`devices.py`) pointing at the flag.
+1. **Posix fix:** `_make_scan_image` → `dest.relative_to(work.root).as_posix()`.
+2. **`config.py`:** rename `debug_markdown` → `markdown_out: Path | None` (only `cli.py`/`ocrmode.py` reference it).
+3. **`markdownize.py` — front matter** (hand-rolled YAML subset, keys `title/author/language`):
+   - `emit_front_matter(meta: dict[str, str]) -> list[str]` → `['---', 'title: …', …, '---', '']`
+   - `parse_front_matter(md: str) -> tuple[dict[str, str], str]` — block must start at line 0 with `---`, `key: value` lines, closing `---` required else treated as body (lenient).
+4. **`markdownize.py` — tolerant parse side only** (emit stays byte-identical except footnotes in C):
+   - `_HEADING_RE = ^(#{1,6})\s+(.*)$` (#### – ###### clamp to h3); `_UL_RE = ^[-*•٭]\s+`; `_OL_RE = ^[0-9٠-٩]{1,3}\s*[.)\-]\s+` (accepts `١-`); `_SCAN_RE` accepts any alt text.
+   - Unknown fence `:::x` → warn + treat line as paragraph (don't swallow following lines); unclosed fence → consume to EOF + warn; stray `:::` → warn + skip. CRLF tolerated (strip handles `\r`).
+   - `markdown_to_book(..., on_warning: Callable[[str], None] | None = None)` — new optional kwarg; `_parse_items(md, warn=None)` internal.
+5. **Exporter** in `ocrmode.py`: `_export_markdown(markdown, dest, meta, work_root)` — front matter + body (bytes unchanged), copy referenced scans from workdir into `dest.parent/'scans'/` so the `.md` is self-contained. Wire into step 5 replacing the `debug_markdown` write.
+6. **CLI:** `convert --markdown-out PATH` (visible; keep hidden `--debug-markdown` alias, coalesce). New `build` command: `pdf2ebook build book.md [out.epub] --title --author --language --split-every --split-volumes --font --preshape`. Precedence: CLI option > front matter > filename stem. Warnings printed bilingually in yellow.
+7. **`buildmd.py`:** `run_build(md_path, out_path, opts, progress=None) -> ConversionResult` — read UTF-8 (tolerate BOM) → `parse_front_matter` → `markdown_to_book` → shared `finalize_chapters(book)` (factor `_split_giant_chapters` + default "قسم N" titles out of `run_text_mode`) → `build_reflow_epub(..., work_root=md_path.parent, ...)` (reflow already resolves `work_root / image_path`). Pre-check missing scan files → bilingual error.
 
-2. **Fonts as a first-class deliverable** (user request: the font ships ready-to-install for
-   ANY reader that lacks Arabic — Kobo, Apple, CrossPoint…, and stays packaged with the text):
-   - EPUBs **already embed Amiri inside the book file** — keep that as the default
-     (`--font amiri`); on Apple Books, Kobo, KOReader and most apps the book carries its own
-     Arabic font and renders even on devices with no Arabic fonts installed.
-   - Pre-convert Amiri to CrossPoint's `.cpfont` format once (sizes 12,14,16,18, intervals
-     incl. presentation forms) and commit the output to `src/pdf2ebook/fonts/cpfont/` so it
-     ships inside the pip package and the .exe — no conversion tooling needed by users.
-   - New CLI command group `pdf2ebook fonts`:
-     - `pdf2ebook fonts export [DIR]` — writes ready-to-install font packages to a folder:
-       `Amiri-Regular.ttf` (copy to a Kobo's `/fonts` folder or any reader that accepts TTF)
-       plus the `cpfont/` set for CrossPoint SD cards, with a small README.txt (AR+EN).
-     - `pdf2ebook fonts install --host <reader-ip>` — uploads the `.cpfont` files over Wi-Fi
-       to the CrossPoint reader's `/.fonts/` directory (reuses `send.py`'s upload with its
-       existing `dest_path` parameter).
-   - Web UI: a small "تثبيت الخط على القارئ — Install font on reader" button next to Send.
+**Tests:** extend `test_markdownize.py` (front-matter round trip, clamping, new list markers, fence warnings lose no text, no-page-comment docs, CRLF, all-kinds parity guard); new `test_build_cli.py` (tmp .md + PNG → EPUB, front-matter title, `--title` override, missing scan → exit 1); extend `test_cli.py` (`convert --markdown-out` on text-layer PDF, then `build` on the result — full circle).
 
-3. **Documentation** — `docs/devices.md` (new): per-device Arabic guide:
-   - **Apple Books / Android-iPhone apps / Kobo / KOReader**: nothing to install — the EPUB
-     embeds Amiri inside the book file; on Kobo enable "use publisher fonts". For readers
-     that ignore embedded fonts: `pdf2ebook fonts export` → copy the TTF to the reader's
-     fonts folder over USB.
-   - **CrossPoint (Xteink X3/X4)**: why boxes appear (no Arabic in built-in fonts; shaping
-     not shipped); steps: `pdf2ebook fonts install --host <ip>` → on the reader Settings →
-     Reader → Font Family → Amiri → convert the book with `--preshape` → send. Expectations:
-     letters join; line direction may stay wrong until CrossPoint's RTL release lands; image
-     mode (`--mode image --device xteink-x4`) remains the guaranteed path today;
-     papyrix-reader fork as alternative firmware with Arabic support.
-   - Link this from README.md + README.ar.md (short paragraph each).
+---
 
-4. **Tests** (new `tests/test_preshape.py` + extend `tests/test_cli.py`):
-   - reshaped output contains presentation-form codepoints (U+FB50–FEFF) and joins lam-alef,
-   - `--preshape` plumbing: convert tiny fixture with flag → chapter xhtml contains
-     presentation forms; without flag → plain Arabic block only,
-   - `fonts export` writes the TTF + cpfont set + bilingual README.txt.
+## Phase B — Triage + honest conversion report
 
-5. Release as **v0.1.2** (version bump, push, tag — release automation is already live).
+**Files:** `textproc/clean.py`, `ocrmode.py`, new `src/pdf2ebook/report.py`, `pipeline.py` (ConversionResult), `cli.py`, `webui/app.py`, `webui/static/index.html`.
 
-## Verification
+1. **`clean.bad_glyph_ratio(text) -> float`:** fraction of non-space chars in `[�-\U000F0000-\U000FFFFD\U00100000-\U0010FFFD]` (U+FFFD + all PUA planes) — signature of legacy non-Unicode Arabic fonts.
+2. **Gate:** factor text-layer selection (ocrmode.py:178–197) into `_select_text_layer(samples, text_layer_opt) -> tuple[set[int], list[str]]`. Book-level `looks_corrupted_arabic` as today + per-page `bad_glyph_ratio > 0.05` → route page to OCR with reason. `--text-layer always` bypasses.
+3. **`report.py`:** route constants (`text-layer | ocr | ocr-rescued | image-kept | blank`); `@dataclass PageReport` (page_no, route, reason, confidence, source_chars, dropped_chars, emitted_chars, coverage); `@dataclass ConversionReport` (pages, warnings, `book_coverage`, `route_counts()`, JSON round trip); `coverage_key(text)` = `normalize_arabic` + strip whitespace; `collect_warnings(report)` — bilingual, thresholds `BOOK_COVERAGE_MIN=0.95`, `PAGE_COVERAGE_MIN=0.80`, cap per-page list ~10.
+4. **Wiring:** `PageData` gains `route`/`reason`. Persist rescue/image flags into the OCR cache JSON as extra keys (`from_json` verified to ignore them; old caches → reason "cached"). **Coverage snapshot per page immediately after `structure_page`, before `merge_page_boundary`** (merge moves chars across pages but never loses them). Helper `_page_char_counts(page, keep_diacritics, drop_line)` mirrors structure_page's drop_line edge rule so junk-dropped lines count as `dropped_chars`, not lost coverage. Write `text/report.json` (additive — doesn't break resume); set `result.report`.
+5. **Surfacing:** CLI rich table "تقرير التحويل — Conversion report" (route counts, mean conf, coverage %) + yellow warnings; web: extend `job.stats` with `routes`/`coverage`/`warnings`, show warnings div in `index.html` (reuse `.warn` styling).
 
-1. `pytest` suite green; `ruff` clean.
-2. Rebuild the Inquisition book with `--preshape` from cached OCR (seconds); script-check the
-   chapter XHTML contains U+FB50–FEFF glyphs and the EPUB still passes structure checks.
-3. **README check**: the per-device section in README.md / README.ar.md / docs/devices.md
-   must let a stranger complete the journey with no outside help — review it against the
-   4-step journey above, in both languages.
-4. **User hardware test** (the user follows the README exactly as a stranger would):
-   `fonts install` + `--preshape` book on the X4. Expected: connected Arabic letters;
-   possibly wrong line direction until upstream RTL ships. If illegible, the README's
-   fallback (image mode for this device) already works. The result tells us what to report
-   upstream to CrossPoint.
+**Tests:** extend `test_textproc.py` (bad_glyph_ratio cases incl. plane-15); new `test_report.py` (`_select_text_layer`, coverage_key, JSON round trip, warning thresholds, `_page_char_counts` vs dropped watermark line); extend `test_cli.py` (report printed + report.json written; warm-cache rerun still reports).
 
-## Out of scope (noted for later)
+---
 
-- Bidi visual reordering for shaping-less LTR renderers (breaks reflow; revisit only if
-  CrossPoint RTL stalls).
-- Upstream contribution: offering CrossPoint test EPUBs/issue report — worth doing after the
-  experiment yields data, with the user's go-ahead.
+## Phase C — Footnotes
+
+**Files:** new `src/pdf2ebook/textproc/footnotes.py`, `ocrmode.py`, `textproc/markdownize.py`, `book.py`, `epub/reflow.py`, `epub/templates.py`, `config.py`, `cli.py`, `webui/app.py`.
+
+1. **`footnotes.py`:** `@dataclass(frozen=True) Footnote(label, text)`; `MARKER_RE` for `(١)` `١-` `١.` `١)` `(1)` `1-` + superscript digits; constants `ZONE_TOP=0.55`, `SIZE_RATIO_MAX=0.85` (text layer), `HEIGHT_RATIO_MAX=0.80` (OCR); `footnote_id(page_no, ordinal) -> "p{page+1}-{ordinal}"`;
+   - `split_footnotes(page, body_size) -> tuple[OcrPage, list[Footnote]]` — maximal trailing run of visible lines that are (a) in bottom 45% of page, (b) clearly smaller than body (exact sizes when available, else height vs page median), (c) first line starts with MARKER_RE; marker-less small lines continue the previous note (wrapping). No block → unchanged.
+   - `rewrite_body_refs(elements, notes, page_no)` — rewrite inline `(L)`/`[L]` body markers (Arabic-Indic/Latin digit equivalence) to `[^p{N}-{k}]` **only when the label occurs exactly once on the page**; otherwise the note renders unreferenced at chapter end. (Line-level bboxes can't see raised baselines — superscript body markers are out of scope for v1, documented.)
+2. **Pipeline:** in step 3, **split footnotes before `structure_page`** (so `١-` note lines aren't eaten by `lists._OL_RE`), then structure, then `rewrite_body_refs`, then append `("footnote", normalized_text)` elements at page end (counts as emitted for B's coverage). Note: a trailing footnote element blocks the step-4 paragraph merge for that page pair — acceptable, comment it.
+3. **Pivot:** `emit_elements(elements, page_no=0)` (default keeps existing callers/tests valid) emits `[^{id}]: text`; `_NEEDS_ESCAPE` gains `\[\^` arm; parse `_FOOTNOTE_RE = ^\[\^([^\]\s]+)\]:\s*(.*)$`; items grow a 4th field (note_id, `""` for others — private API). `markdown_to_book` → `Paragraph(text, "footnote", note_id=...)`, never a chapter trigger.
+4. **`book.py`:** `Paragraph.note_id: str = ""`; JSON emits only when non-empty, `from_json` defaults — old `book.json` caches load.
+5. **EPUB (`reflow.py`/`templates.py`):** body refs — after `escape()`, `re.sub(r"\[\^([^\]\s]+)\]", …)` → `<a epub:type="noteref" class="noteref" href="#fn-{id}" id="ref-fn-{id}"><sup>{n}</sup></a>` (Arabic-Indic numerals for `ar`); unknown id → unlinked `<sup>`. Chapter end always renders `<div class="footnotes"><hr/>` + `<aside epub:type="footnote" class="footnote" id="fn-{id}"><p><a href="#ref-…" epub:type="backlink">١.</a> text</p></aside>` (backlink only when a ref exists). Same-file ref+aside → popup notes on iBooks/Kobo/Thorium, graceful list elsewhere. Add CSS: `div.footnotes` (0.85em, top rule), `aside.footnote p`, `a.noteref`.
+6. **Config/CLI/web:** `PipelineOptions.footnotes: bool = True`; `--footnotes/--no-footnotes`; `footnotes: bool = Form(True)`.
+
+**Tests:** new `test_footnotes.py` (text-layer sizes split + wrapped continuation; OCR-height detection; negatives: top-of-page small line, body-size bottom line, markerless page; `١-` note not structured as `ol`; rewrite uniqueness rules; Arabic/Latin digit matching); extend `test_markdownize.py` (footnote round trip, `[^`-paragraph escape, body ref passthrough); extend EPUB chain test (noteref + aside + backlink, well-formed XML, unmatched note unlinked); `test_cli.py` `--no-footnotes`.
+
+**Risk:** false positives (e.g. small dated signature line) — mitigated by requiring all three signals + trailing-run-only + `--no-footnotes` escape hatch; thresholds are module constants.
+
+---
+
+## Phase D — Bold-ratio heading signal
+
+**Files:** `ocr/base.py`, `pdfio.py`, `textproc/headings.py`.
+
+1. **`OcrLine.bold: float = 0.0`** (fraction of chars bold; OCR leaves 0.0); `from_json` → `ln.get("bold", 0.0)`.
+2. **`pdfio.extract_text_page`:** per char alongside `FPDFText_GetFontSize`, collect `FPDFText_GetFontWeight` (try/except + hasattr guard → degrade to 0.0, never crash); per line over the same box-center-mapped chars: `bold_ratio = |weight≥600| / |known|`. Fallback when no usable weights: one `FPDFText_GetFontInfo` call for the line's first char — bold if name contains "bold" (ci) or descriptor flags bit `1<<18` (ForceBold) → 1.0.
+3. **`headings.heading_tiers`:** fourth self-sufficient arm, inert on OCR pages:
+   `bold = body_size > 0 and ln.size > 0 and ln.bold >= 0.6 and ln.size >= body_size * 0.98`
+   `if (big and centered) or (keyword and centered) or (keyword and big) or bold:` → tier: `tier if big else ("h2" if keyword else _tier_font(ratio))` (bold body-size line → h3). Existing ≤8-words guard already excludes long bold emphasis lines. Update docstring to name all four signals.
+
+**Tests:** extend `test_structure.py` (`_line` gains `bold=` kwarg: bold body-size off-center → h3; bold 1.5× → h2; bold 0.4 → not heading; OCR `size=0` + bold=1.0 → not heading; existing tier tests unchanged); extend `test_pdfio_geometry.py` (`_make_text_pdf` gains a `/F2 Helvetica-Bold` font object + per-item font choice; assert bold line `bold >= 0.5`, regular `== 0.0`); OcrLine JSON round trip incl. legacy blobs without `bold`.
+
+---
+
+## Order & verification
+
+Implement A → B → C → D; each phase lands green independently.
+
+After each phase: `ruff check src tests` + `pytest -q` (full suite; parity guards are the tripwire).
+
+End-to-end verification (no Tesseract needed):
+1. `pdf2ebook convert tests-generated text-layer PDF --markdown-out book.md` → inspect `book.md` (front matter, posix scan refs), confirm conversion report table + `workdir/text/report.json`.
+2. Hand-edit `book.md` (change a heading, add a `####`), `pdf2ebook build book.md` → valid EPUB reflecting edits.
+3. With a real Arabic PDF (user-supplied, e.g. one with footnotes): confirm footnote asides/noterefs in the EPUB XHTML (unzip + inspect), popup behavior in Thorium/calibre viewer, report coverage ≥95%, and `--no-footnotes` round trip.
+4. Web UI: convert a PDF, confirm warnings/coverage appear in the job status panel.

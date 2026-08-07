@@ -1,5 +1,5 @@
 # Session Context
-> Auto-saved by SessionEnd hook at 2026-06-12 09:49:46
+> Auto-saved by SessionEnd hook at 2026-08-07 14:09:22
 > Read by SessionStart hook to restore context after compaction or between sessions.
 
 ## Current Task
@@ -10,12 +10,15 @@ _No task set. Claude updates this section when starting work._
 
 ### Modified Files
 ```
-No changes
+M .claude/approved-plan.md
+ M .claude/session-context.md
 ```
 
 ### Unstaged Diff Summary
 ```
-No unstaged changes
+.claude/approved-plan.md   | 215 +++++++++++++++++++++------------------------
+ .claude/session-context.md |  19 ++--
+ 2 files changed, 113 insertions(+), 121 deletions(-)
 ```
 
 ### Staged Diff Summary
@@ -25,11 +28,11 @@ No staged changes
 
 ### Recent Commits
 ```
-8ece697 v0.1.2: CrossPoint Arabic support + self-service font pack
-081887c Fix UTF-8 BOM written into pyproject.toml by PowerShell Set-Content
-6982db2 Lint: remove unused import
-a60b918 Add classical poetry and Quranic quote handling (v0.1.1)
-44ad694 Add detailed Arabic README, screenshots, repo polish
+f2d23f5 Harden EPUB conversion pipeline
+85006d4 Add Markdown-first workflow, conversion report, footnotes, bold headings
+2bb154b Structure pages into clean Markdown internally before building the EPUB
+d323811 Robust CrossPoint font install: API endpoint with manual SD fallback
+dc873c6 v0.1.3: fix font install to CrossPoint readers
 ```
 
 ## Notes
