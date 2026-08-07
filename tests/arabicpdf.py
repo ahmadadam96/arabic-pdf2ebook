@@ -116,14 +116,14 @@ def write_pdf(path: Path, pages: list[Page]) -> Path:
     objects: list[bytes] = [
         b"<< /Type /Catalog /Pages 2 0 R >>",
         b"<< /Type /Pages /Kids [%s] /Count %d >>" % (kids.encode("latin-1"), len(pages)),
-        b"<< /Type /Font /Subtype /Type0 /BaseFont /ArabicFixture /Encoding /Identity-H "
-        b"/DescendantFonts [4 0 R] /ToUnicode 6 0 R >>",
+        (b"<< /Type /Font /Subtype /Type0 /BaseFont /ArabicFixture /Encoding /Identity-H "
+         b"/DescendantFonts [4 0 R] /ToUnicode 6 0 R >>"),
         b"<< /Type /Font /Subtype /CIDFontType2 /BaseFont /ArabicFixture "
         b"/CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> "
         b"/FontDescriptor 5 0 R /DW %d >>" % int(ADVANCE * 1000),
-        b"<< /Type /FontDescriptor /FontName /ArabicFixture /Flags 4 "
-        b"/FontBBox [0 -200 1000 900] /ItalicAngle 0 /Ascent 900 /Descent -200 "
-        b"/CapHeight 700 /StemV 80 >>",
+        (b"<< /Type /FontDescriptor /FontName /ArabicFixture /Flags 4 "
+         b"/FontBBox [0 -200 1000 900] /ItalicAngle 0 /Ascent 900 /Descent -200 "
+         b"/CapHeight 700 /StemV 80 >>"),
         b"<< /Length %d >>\nstream\n%s\nendstream" % (len(cmap), cmap),
     ]
     for i, page in enumerate(pages):

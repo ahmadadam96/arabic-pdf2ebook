@@ -17,7 +17,7 @@ right margin and run leftwards.
 
 from __future__ import annotations
 
-from typing import Callable
+from collections.abc import Callable
 
 from pdf2ebook.ocr.base import OcrLine, OcrPage, OcrWord
 

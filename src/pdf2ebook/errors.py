@@ -21,17 +21,17 @@ from __future__ import annotations
 from typing import ClassVar
 
 __all__ = [
-    "Pdf2EbookError",
-    "InvalidOptionError",
-    "UnsupportedInputError",
-    "PdfError",
-    "MalformedDocumentError",
     "EncryptedDocumentError",
-    "SourceUnreadableError",
-    "ResourceLimitError",
+    "EpubValidationError",
+    "InvalidOptionError",
+    "MalformedDocumentError",
     "MissingAssetError",
     "OcrUnavailableError",
-    "EpubValidationError",
+    "Pdf2EbookError",
+    "PdfError",
+    "ResourceLimitError",
+    "SourceUnreadableError",
+    "UnsupportedInputError",
 ]
 
 

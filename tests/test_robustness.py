@@ -69,7 +69,7 @@ def test_mutated_fixtures_raise_only_typed_errors(fixture, tmp_path):
                     pdf.page_size_pts(index)
         except Pdf2EbookError:
             continue  # the documented outcome for unusable input
-        except Exception as exc:  # noqa: BLE001 — the whole point of the test
+        except Exception as exc:  # a blind catch IS the assertion here
             raise AssertionError(
                 f"{fixture.name} mutant {n} raised an untyped "
                 f"{type(exc).__name__}: {exc}"
@@ -86,7 +86,7 @@ def test_mutated_fixtures_survive_inspect(fixture, tmp_path):
             inspect_pdf(path)
         except Pdf2EbookError:
             continue
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             raise AssertionError(
                 f"{fixture.name} mutant {n}: inspect raised an untyped "
                 f"{type(exc).__name__}: {exc}"
@@ -104,7 +104,7 @@ def test_truncated_pdf_fails_typed(tmp_path):
                 pdf.extract_text(0)
         except Pdf2EbookError:
             continue
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             raise AssertionError(f"truncation at {cut} raised untyped "
                                  f"{type(exc).__name__}: {exc}") from exc
 
@@ -123,6 +123,6 @@ def test_full_conversion_of_a_mutant_never_leaks_untyped(tmp_path):
             run_text_mode(path, tmp_path / f"out_{n}.epub", opts)
         except Pdf2EbookError:
             continue
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             raise AssertionError(f"mutant {n} conversion raised untyped "
                                  f"{type(exc).__name__}: {exc}") from exc

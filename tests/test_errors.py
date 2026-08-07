@@ -6,8 +6,13 @@ import pytest
 
 from pdf2ebook import errors
 from pdf2ebook.config import PipelineOptions, validate_pipeline_options
-from pdf2ebook.errors import (EncryptedDocumentError, InvalidOptionError, MalformedDocumentError,
-                              Pdf2EbookError, SourceUnreadableError)
+from pdf2ebook.errors import (
+    EncryptedDocumentError,
+    InvalidOptionError,
+    MalformedDocumentError,
+    Pdf2EbookError,
+    SourceUnreadableError,
+)
 from pdf2ebook.pdfio import PdfError, PdfRasterizer
 
 

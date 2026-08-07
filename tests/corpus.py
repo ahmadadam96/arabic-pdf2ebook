@@ -16,9 +16,9 @@ that routed to OCR could not run there.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
 
 from arabicpdf import Line, Page, to_pua, write_pdf
 
