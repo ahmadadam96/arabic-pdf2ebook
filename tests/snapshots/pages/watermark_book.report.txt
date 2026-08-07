@@ -1,0 +1,9 @@
+verdict: 
+coverage: 1.00
+
+page 1: route=text-layer coverage=1.00 src=104 dropped=18 emitted=104
+page 2: route=text-layer coverage=1.00 src=97 dropped=18 emitted=97
+page 3: route=text-layer coverage=1.00 src=106 dropped=18 emitted=106
+page 4: route=text-layer coverage=1.00 src=101 dropped=18 emitted=101
+page 5: route=text-layer coverage=1.00 src=114 dropped=18 emitted=114
+page 6: route=text-layer coverage=1.00 src=98 dropped=18 emitted=98

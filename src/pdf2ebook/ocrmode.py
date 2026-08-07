@@ -21,9 +21,12 @@ from typing import Callable
 
 from PIL import Image
 
+from . import limits
 from .book import Book, Chapter, PageImage, Paragraph
 from .config import EpubMeta, PipelineOptions, parse_page_range
 from .epub.reflow import build_reflow_epub
+from .errors import InvalidOptionError, MissingAssetError
+from .limits import SCAN_MAX_HEIGHT
 from .ocr.base import OcrPage
 from .ocr.registry import get_backend
 from .pdfio import PdfRasterizer
@@ -31,20 +34,34 @@ from .pipeline import (ConversionResult, Progress, default_title, default_work_d
                        ensure_output_outside_workdir, extract_pages, file_fingerprints)
 from .preprocess import ops
 from .preprocess.pipeline import detect_image_page, preprocess_for_image, preprocess_for_ocr
-from .report import (ROUTE_BLANK, ROUTE_IMAGE, ROUTE_OCR, ROUTE_RESCUED, ROUTE_TEXT,
-                     ConversionReport, PageReport, collect_warnings, coverage_key)
+from .report import (PAGE_COVERAGE_MIN, ROUTE_BLANK, ROUTE_IMAGE, ROUTE_OCR, ROUTE_RESCUED,
+                     ROUTE_TEXT, ConversionReport, PageReport, collect_warnings, coverage_key)
 from .textproc import clean, footnotes
 from .textproc.markdownize import (emit_elements, emit_front_matter, emit_page_break,
                                    emit_scan, markdown_to_book)
 from .textproc.paragraphs import merge_page_boundary
-from .textproc.structure import structure_page
+from .textproc.structure import structure_page, structure_page_flat
 from .workdir import WorkDir
 
 TEXT_LAYER_MIN_CHARS = 200
 TEXT_LAYER_SHORT_MIN_CHARS = 20
 MIN_WORDS_PER_PAGE = 15
-SCAN_MAX_HEIGHT = 1400
 BAD_GLYPH_MAX = 0.05  # per page: above this share of U+FFFD/PUA chars → OCR instead
+
+# Book-level text-layer verdict (see _select_text_layer). A book whose text
+# layer is broken on more than this share of its *measurable* pages goes to OCR
+# whole, rather than interleaving clean OCR pages with corrupt extracted ones.
+CORRUPT_BOOK_MAX = 0.25
+MIN_MEASURABLE_PAGES = 3
+# clean.looks_corrupted_arabic needs roughly this many words to be meaningful;
+# below it the ligature-loss signal is noise, so the page has no verdict of its own.
+CORRUPTION_MIN_WORDS = 40
+
+# Below this measured coverage a page is rebuilt with the flat structurer,
+# which loses structure but cannot lose text. Near-empty pages are exempt: a
+# two-line page can read as 0% coverage without anything being wrong.
+STRUCTURE_FALLBACK_BELOW = PAGE_COVERAGE_MIN
+MIN_FALLBACK_CHARS = 40
 
 DropLine = Callable[[str, bool], bool]  # (line_text, is_page_edge) -> drop?
 
@@ -59,6 +76,12 @@ class PageData:
     mean_conf: float = 100.0
     route: str = ""    # report route: text-layer | ocr | ocr-rescued | image-kept | blank
     reason: str = ""   # human-readable why-this-route
+    notes: list[str] = field(default_factory=list)  # recoverable losses, for the report
+    footnote_defs: list = field(default_factory=list)  # Footnote objects split off the page
+    # The page minus its footnote block — what the structurer sees. `payload`
+    # stays the *whole* page, because coverage has to be measured against
+    # everything the page held, notes included.
+    body_page: object = None
 
     def line_texts(self) -> list[str]:
         if self.kind in ("ocr", "text") and self.payload is not None:
@@ -167,31 +190,79 @@ def apply_preshape(book: Book) -> None:
 # Chapter weighting / giant-chapter splitting
 # ---------------------------------------------------------------------------
 
-def _select_text_layer(samples: dict[int, str],
-                       text_layer_opt: str) -> tuple[set[int], dict[int, str]]:
-    """Decide which sampled pages may use their embedded text layer.
+def _page_defect(text: str) -> str:
+    """Why this page's own text layer is untrustworthy, or '' when it is fine."""
+    # Replacement/private-use glyphs are conclusive at any length: the embedded
+    # font carries no meaning, so nothing can be recovered from the codepoints.
+    ratio = clean.bad_glyph_ratio(text)
+    if ratio > BAD_GLYPH_MAX:
+        return f"bad glyphs {ratio:.0%} (non-Unicode font) — خط غير قياسي"
+    # Ligature loss is a statistical signal; looks_corrupted_arabic self-guards
+    # below CORRUPTION_MIN_WORDS and simply returns False on a sparse page.
+    if clean.looks_corrupted_arabic(text):
+        return "text layer corrupted (ligature loss) — العتاد النصي تالف"
+    return ""
 
-    Returns (allowed page indices, {excluded index: reason}).
-    - 'always': keep every sampled page (no gating).
-    - otherwise: per-page corruption and bad-glyph gates drop bad pages to OCR
-      while keeping healthy pages, including sparse heading/front-matter pages.
+
+def _select_text_layer(samples: dict[int, str],
+                       text_layer_opt: str) -> tuple[set[int], dict[int, str], str]:
+    """Decide which pages may use their embedded text layer.
+
+    Returns (allowed page indices, {excluded index: reason}, book verdict).
+
+    Two stages, so one book gets one answer:
+
+    1. **Book verdict.** Corruption is judged only on pages carrying enough words
+       for the signal to mean anything (``CORRUPTION_MIN_WORDS``). If more than
+       ``CORRUPT_BOOK_MAX`` of *those* pages are defective, the whole book routes
+       to OCR — including the sparse pages that individually looked fine.
+    2. **Per-page demotion.** Only when the book verdict is "usable" do per-page
+       gates run, and only to send a page to OCR — never to rescue one. A short
+       page has no valid signal of its own, so it follows the book verdict rather
+       than being judged on thirty words.
+
+    This is what stops a book from interleaving clean OCR pages with corrupt
+    extracted ones — two different-looking halves of the same chapter.
+    ``--text-layer always`` bypasses both stages.
     """
     if not samples:
-        return set(), {}
+        return set(), {}, "no embedded text layer — لا توجد طبقة نصية"
     if text_layer_opt == "always":
-        return set(samples), {}
+        return set(samples), {}, "text layer forced — الطبقة النصية مفروضة (--text-layer always)"
+
+    measurable = {i: t for i, t in samples.items()
+                  if len(t.split()) >= CORRUPTION_MIN_WORDS}
+    defects = {i: _page_defect(t) for i, t in samples.items()}
+    bad_measurable = [i for i in measurable if defects[i]]
+
+    if len(measurable) >= MIN_MEASURABLE_PAGES:
+        share = len(bad_measurable) / len(measurable)
+        if share > CORRUPT_BOOK_MAX:
+            verdict = (
+                f"رُفضت الطبقة النصية للكتاب كله: {share:.0%} من {len(measurable)} صفحة قابلة "
+                f"للقياس تالفة — text layer rejected book-wide: {share:.0%} of {len(measurable)} "
+                "measurable pages are corrupt; every page goes to OCR for a consistent book."
+            )
+            return set(), dict.fromkeys(samples, verdict), verdict
+        verdict = (
+            f"الطبقة النصية مقبولة ({share:.0%} من {len(measurable)} صفحة تالفة) — "
+            f"text layer accepted: {share:.0%} of {len(measurable)} measurable pages are corrupt."
+        )
+    else:
+        verdict = (
+            f"الطبقة النصية مقبولة (عينة صغيرة: {len(measurable)} صفحة قابلة للقياس) — "
+            f"text layer accepted on a small sample of {len(measurable)} measurable page(s)."
+        )
+
     allowed: set[int] = set()
     excluded: dict[int, str] = {}
-    for idx, text in samples.items():
-        if clean.looks_corrupted_arabic(text):
-            excluded[idx] = "text layer corrupted (ligature loss) — العتاد النصي تالف، سيُستخدم OCR"
-            continue
-        ratio = clean.bad_glyph_ratio(text)
-        if ratio > BAD_GLYPH_MAX:
-            excluded[idx] = f"bad glyphs {ratio:.0%} (non-Unicode font) — خط غير قياسي، سيُستخدم OCR"
+    for idx in samples:
+        defect = defects[idx]
+        if defect:
+            excluded[idx] = f"{defect}، سيُستخدم OCR"
         else:
             allowed.add(idx)
-    return allowed, excluded
+    return allowed, excluded, verdict
 
 
 def _image_route_and_reason(ocr_page: OcrPage, image_page: bool | None,
@@ -254,12 +325,6 @@ def _element_weight(el: Paragraph | PageImage) -> int:
     return len(el.text) if isinstance(el, Paragraph) else 150_000
 
 
-# Readers struggle with giant chapter files (spec guidance ~300 KB/XHTML);
-# huge undetected-heading books can produce multi-megabyte chapters.
-MAX_CHAPTER_WEIGHT = 400_000
-TARGET_CHAPTER_WEIGHT = 250_000
-
-
 def _split_giant_chapters(chapters: list[Chapter]) -> list[Chapter]:
     from .pipeline import _volume_chunks
 
@@ -267,14 +332,159 @@ def _split_giant_chapters(chapters: list[Chapter]) -> list[Chapter]:
     for chapter in chapters:
         weights = [_element_weight(el) for el in chapter.elements]
         total = sum(weights)
-        if total <= MAX_CHAPTER_WEIGHT or len(chapter.elements) <= 3:
+        if total <= limits.MAX_CHAPTER_WEIGHT or len(chapter.elements) <= 3:
             out.append(chapter)
             continue
-        parts = max(2, round(total / TARGET_CHAPTER_WEIGHT))
+        parts = max(2, round(total / limits.TARGET_CHAPTER_WEIGHT))
         for k, els in enumerate(_volume_chunks(chapter.elements, parts, weights)):
             part_title = chapter.title if k == 0 else f"{chapter.title} ({k + 1})"
             out.append(Chapter(part_title, els))
     return out
+
+
+# ---------------------------------------------------------------------------
+# Structuring: recognized pages → Markdown + report
+# ---------------------------------------------------------------------------
+
+def structure_pages(
+    pages_data: list[PageData],
+    opts: PipelineOptions,
+    body_size: float,
+    *,
+    extra_patterns: list | None = None,
+    degraded: dict[int, list[str]] | None = None,
+    text_layer_reasons: dict[int, str] | None = None,
+    book_verdict: str = "",
+    result: ConversionResult | None = None,
+) -> tuple[str, ConversionReport]:
+    """Turn recognized pages into the Markdown pivot and the conversion report.
+
+    Split out of `run_text_mode` so the structuring heuristics can be exercised
+    directly from `OcrPage` fixtures — feeding them through a synthetic PDF
+    would test pdfium's line grouping as much as our own rules. `run_text_mode`
+    is the only production caller.
+
+    Steps, in the order the comments below mark them:
+      3.  repeated header/footer detection, then per-page structuring
+      3b. coverage measurement and the flat-structure fallback
+      4.  paragraph merge across page boundaries
+      5.  serialization to Markdown
+    """
+    extra_patterns = extra_patterns or []
+    degraded = degraded or {}
+    text_layer_reasons = text_layer_reasons or {}
+    result = result if result is not None else ConversionResult()
+
+    # 3. Detect repeated headers/footers, then build elements with the
+    #    line-level junk filter (watermarks never reach paragraph building).
+    repeated = clean.find_repeated_lines([p.line_texts() for p in pages_data
+                                          if p.kind != "image"])
+    result.stripped_lines = repeated
+
+    def drop_line(text: str, edge: bool) -> bool:
+        if clean.is_watermark(text, extra_patterns):
+            return True
+        if clean.is_page_number(text):
+            return True
+        if clean.is_junk_line(text, edge=edge):
+            return True
+        return bool(repeated) and clean.matches_repeated(text, repeated)
+
+    def build_elements(data: PageData, flat: bool = False) -> list[tuple[str, str]]:
+        """Structure one page's payload into elements, notes appended.
+
+        Shared by the normal pass and the coverage fallback so both produce the
+        same shape — only the body structurer differs.
+        """
+        body = data.body_page if data.body_page is not None else data.payload
+        if flat:
+            elements = structure_page_flat(body, opts.ocr.keep_diacritics, drop_line)
+        else:
+            elements = structure_page(body, opts.ocr.keep_diacritics, drop_line, body_size)
+        if data.footnote_defs:
+            elements = footnotes.rewrite_body_refs(elements, data.footnote_defs, data.index)
+            elements = elements + [
+                ("footnote", clean.normalize_arabic(note.text, opts.ocr.keep_diacritics))
+                for note in data.footnote_defs
+            ]
+        return elements
+
+    for data in pages_data:
+        if data.kind in ("ocr", "text"):
+            if opts.footnotes:
+                # Split the footnote block *before* structuring so its "١-" lines
+                # are not mistaken for an ordered list or merged into prose.
+                data.body_page, data.footnote_defs = footnotes.split_footnotes(
+                    data.payload, body_size)
+            data.elements = build_elements(data)
+
+    # 3b. Coverage snapshot — measure per page here, *before* the boundary merge
+    #     moves a paragraph's chars from one page to the next (which would fake a
+    #     per-page dip). The merge never loses chars, so pre-merge counts are exact.
+    report = ConversionReport(book_verdict=book_verdict)
+    for data in pages_data:
+        page_reason = data.reason
+        if data.index in text_layer_reasons and data.route != ROUTE_TEXT:
+            # Explain *why* a page with a text layer ended up on OCR / image.
+            page_reason = f"{text_layer_reasons[data.index]}; {data.reason}"
+        notes = degraded.get(data.index, []) + data.notes
+        if data.kind in ("ocr", "text"):
+            kept, dropped = _page_char_counts(data.payload, opts.ocr.keep_diacritics, drop_line)
+            emitted = sum(len(coverage_key(text)) for _, text in data.elements)
+            coverage = emitted / kept if kept else 1.0
+            # The coverage safety net: when the structurer dropped too much of a
+            # page, rebuild it flat. Structure is worth losing; text is not.
+            if (opts.structure_fallback and kept >= MIN_FALLBACK_CHARS
+                    and coverage < STRUCTURE_FALLBACK_BELOW):
+                flat = build_elements(data, flat=True)
+                flat_emitted = sum(len(coverage_key(text)) for _, text in flat)
+                if flat_emitted > emitted:
+                    notes.append(
+                        f"بناء مسطح احتياطي (التغطية كانت {coverage:.0%}) — structure fallback: "
+                        f"the smart builder kept {coverage:.0%} of the page, "
+                        f"the flat one keeps {flat_emitted / kept:.0%}")
+                    data.elements = flat
+                    emitted, coverage = flat_emitted, flat_emitted / kept
+                    result.pages_structure_fallback += 1
+            report.pages.append(PageReport(
+                page_no=data.index, route=data.route, reason=page_reason,
+                confidence=round(data.mean_conf, 1), source_chars=kept,
+                dropped_chars=dropped, emitted_chars=emitted, coverage=round(coverage, 3),
+                notes=notes))
+        else:
+            report.pages.append(PageReport(
+                page_no=data.index, route=data.route, reason=page_reason,
+                confidence=round(data.mean_conf, 1), notes=notes))
+    report.warnings = collect_warnings(report)
+    result.report = report
+
+    # 4. Merge paragraphs across page boundaries.
+    for prev, cur in zip(pages_data, pages_data[1:]):
+        if prev.kind == "image" or cur.kind == "image":
+            continue
+        if not prev.elements or not cur.elements:
+            continue
+        if prev.elements[-1][0] != "p" or cur.elements[0][0] != "p":
+            continue
+        merged_prev, merged_cur = merge_page_boundary(
+            [prev.elements[-1][1]], [cur.elements[0][1]]
+        )
+        if len(merged_cur) == 0:  # merge happened
+            prev.elements[-1] = ("p", merged_prev[-1])
+            cur.elements.pop(0)
+
+    # 5. Serialize the structured pages to an in-memory Markdown document. It is
+    #    parsed straight back into the Book model (PDF → Markdown → EPUB) and
+    #    written to disk only when --markdown-out is set.
+    md_lines: list[str] = []
+    for data in pages_data:
+        md_lines.append(emit_page_break(data.index))
+        if data.kind == "image":
+            if data.image_rel:
+                md_lines.append(emit_scan(data.image_rel))
+        else:
+            md_lines.extend(emit_elements(data.elements, data.index))
+    return "\n".join(md_lines), report
 
 
 # ---------------------------------------------------------------------------
@@ -292,7 +502,15 @@ def run_text_mode(
     ensure_output_outside_workdir(out_path, work)
     extra_patterns = clean.compile_extra_patterns(opts.ocr.strip_patterns)
 
-    with PdfRasterizer(pdf_path) as pdf:
+    # Recoverable quality losses reported by the PDF layer, per page. These do
+    # not stop the conversion — they explain, in the report, why a page came out
+    # structured differently from its neighbours.
+    degraded: dict[int, list[str]] = {}
+
+    def note_degraded(page_index: int, note: str) -> None:
+        degraded.setdefault(page_index, []).append(note)
+
+    with PdfRasterizer(pdf_path, on_degrade=note_degraded) as pdf:
         indices = parse_page_range(opts.pages, pdf.page_count)
         result.pages_total = len(indices)
         if not opts.meta.author:
@@ -307,13 +525,15 @@ def run_text_mode(
         #    with a broken/non-Unicode layer are gated out (see _select_text_layer).
         direct_pages: dict[int, OcrPage] = {}
         text_layer_reasons: dict[int, str] = {}
+        book_verdict = "text layer not consulted — لم تُستخدم الطبقة النصية"
         if opts.mode == "auto" and opts.text_layer != "never":
             samples: dict[int, str] = {}
             for idx in indices:
                 stripped = pdf.extract_text(idx).strip()
                 if len(stripped) >= TEXT_LAYER_SHORT_MIN_CHARS:
                     samples[idx] = stripped
-            allowed, text_layer_reasons = _select_text_layer(samples, opts.text_layer)
+            allowed, text_layer_reasons, book_verdict = _select_text_layer(
+                samples, opts.text_layer)
             for idx in allowed:
                 page = pdf.extract_text_page(idx)
                 if page and page.lines:
@@ -419,89 +639,11 @@ def run_text_mode(
         if progress:
             progress("ocr", n + 1, len(indices))
 
-    # 3. Detect repeated headers/footers, then build elements with the
-    #    line-level junk filter (watermarks never reach paragraph building).
-    repeated = clean.find_repeated_lines([p.line_texts() for p in pages_data
-                                          if p.kind != "image"])
-    result.stripped_lines = repeated
-
-    def drop_line(text: str, edge: bool) -> bool:
-        if clean.is_watermark(text, extra_patterns):
-            return True
-        if clean.is_page_number(text):
-            return True
-        if clean.is_junk_line(text, edge=edge):
-            return True
-        return bool(repeated) and clean.matches_repeated(text, repeated)
-
-    for data in pages_data:
-        if data.kind in ("ocr", "text"):
-            payload = data.payload
-            notes: list = []
-            if opts.footnotes:
-                # Split the footnote block *before* structuring so its "١-" lines
-                # are not mistaken for an ordered list or merged into prose.
-                payload, notes = footnotes.split_footnotes(payload, body_size)
-            data.elements = structure_page(payload, opts.ocr.keep_diacritics,
-                                           drop_line, body_size)
-            if notes:
-                data.elements = footnotes.rewrite_body_refs(data.elements, notes, data.index)
-                data.elements += [
-                    ("footnote", clean.normalize_arabic(note.text, opts.ocr.keep_diacritics))
-                    for note in notes
-                ]
-
-    # 3b. Coverage snapshot — measure per page here, *before* the boundary merge
-    #     moves a paragraph's chars from one page to the next (which would fake a
-    #     per-page dip). The merge never loses chars, so pre-merge counts are exact.
-    report = ConversionReport()
-    for data in pages_data:
-        page_reason = data.reason
-        if data.index in text_layer_reasons and data.route != ROUTE_TEXT:
-            # Explain *why* a page with a text layer ended up on OCR / image.
-            page_reason = f"{text_layer_reasons[data.index]}; {data.reason}"
-        if data.kind in ("ocr", "text"):
-            kept, dropped = _page_char_counts(data.payload, opts.ocr.keep_diacritics, drop_line)
-            emitted = sum(len(coverage_key(text)) for _, text in data.elements)
-            coverage = emitted / kept if kept else 1.0
-            report.pages.append(PageReport(
-                page_no=data.index, route=data.route, reason=page_reason,
-                confidence=round(data.mean_conf, 1), source_chars=kept,
-                dropped_chars=dropped, emitted_chars=emitted, coverage=round(coverage, 3)))
-        else:
-            report.pages.append(PageReport(
-                page_no=data.index, route=data.route, reason=page_reason,
-                confidence=round(data.mean_conf, 1)))
-    report.warnings = collect_warnings(report)
-    result.report = report
-
-    # 4. Merge paragraphs across page boundaries.
-    for prev, cur in zip(pages_data, pages_data[1:]):
-        if prev.kind == "image" or cur.kind == "image":
-            continue
-        if not prev.elements or not cur.elements:
-            continue
-        if prev.elements[-1][0] != "p" or cur.elements[0][0] != "p":
-            continue
-        merged_prev, merged_cur = merge_page_boundary(
-            [prev.elements[-1][1]], [cur.elements[0][1]]
-        )
-        if len(merged_cur) == 0:  # merge happened
-            prev.elements[-1] = ("p", merged_prev[-1])
-            cur.elements.pop(0)
-
-    # 5. Serialize the structured pages to an in-memory Markdown document, then
-    #    parse it back into the Book model (PDF → Markdown → EPUB). The Markdown
-    #    is written to disk only when --markdown-out is set.
-    md_lines: list[str] = []
-    for data in pages_data:
-        md_lines.append(emit_page_break(data.index))
-        if data.kind == "image":
-            if data.image_rel:
-                md_lines.append(emit_scan(data.image_rel))
-        else:
-            md_lines.extend(emit_elements(data.elements, data.index))
-    markdown = "\n".join(md_lines)
+    # 3-5. Structure the recognized pages into Markdown + the report.
+    markdown, report = structure_pages(
+        pages_data, opts, body_size,
+        extra_patterns=extra_patterns, degraded=degraded,
+        text_layer_reasons=text_layer_reasons, book_verdict=book_verdict, result=result)
 
     title = opts.meta.title or default_title(pdf_path)
     if opts.markdown_out:
@@ -522,11 +664,13 @@ def run_text_mode(
 
     text_dir = work.stage_dir("text")
     book.save(text_dir / "book.json")
-    # report.json is additive in the text/ stage — it never gates resume.
-    (text_dir / "report.json").write_text(report.to_json(), encoding="utf-8")
 
     # 6. Build EPUB volume(s).
     from .pipeline import _volume_chunks, _volume_path
+
+    def on_build_warning(message: str) -> None:
+        if message not in report.warnings:
+            report.warnings.append(message)
 
     font_files = resolve_fonts(opts.font)
     # Weight chapters by content so multi-volume splits come out even.
@@ -537,10 +681,16 @@ def run_text_mode(
         vol_out = _volume_path(out_path, vol, len(chunks))
         vol_book = Book(title=vol_title, author=book.author, language=book.language,
                         chapters=chunk)
-        build_reflow_epub(vol_book, vol_out, work.root, font_files)
+        build_reflow_epub(vol_book, vol_out, work.root, font_files,
+                          book_id=opts.book_id, on_warning=on_build_warning)
         result.outputs.append(vol_out)
         if progress:
             progress("epub", vol + 1, len(chunks))
+
+    # Written after the build so warnings raised while rendering the EPUB
+    # (unresolved footnote refs) make it into the file. Still additive in the
+    # text/ stage — it never gates resume.
+    (text_dir / "report.json").write_text(report.to_json(), encoding="utf-8")
 
     if opts.clean:
         work.cleanup()
@@ -556,9 +706,9 @@ def resolve_fonts(choice: str) -> list[Path]:
     }
     if choice not in mapping:
         valid = ", ".join(["amiri", "none"])
-        raise ValueError(f"font must be one of: {valid}")
+        raise InvalidOptionError(f"font must be one of: {valid}")
     files = [fonts_dir / name for name in mapping[choice]]
     missing = [f.name for f in files if not f.exists()]
     if missing:
-        raise ValueError(f"Requested font asset missing: {', '.join(missing)}")
+        raise MissingAssetError(f"Requested font asset missing: {', '.join(missing)}")
     return files

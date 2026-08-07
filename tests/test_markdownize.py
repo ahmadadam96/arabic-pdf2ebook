@@ -4,6 +4,8 @@ import re
 import xml.dom.minidom
 import zipfile
 
+import pytest
+
 from pdf2ebook.book import PageImage, Paragraph
 from pdf2ebook.epub.reflow import build_reflow_epub
 from pdf2ebook.textproc.markdownize import (
@@ -300,13 +302,23 @@ def test_unsafe_markdown_footnote_id_generates_safe_xhtml_anchors(tmp_path):
     xml.dom.minidom.parseString(chap)
 
 
-def test_unknown_footnote_ref_drops_marker(tmp_path):
+def test_unknown_footnote_ref_kept_as_literal_text(tmp_path):
+    """A ref with no matching note must never delete characters from the book.
+
+    It used to render as "" — silently removing the marker (and, for text the
+    author actually wrote, real content). It now survives as literal text and
+    the build reports it.
+    """
     from pdf2ebook.book import Book, Chapter
     chapter = Chapter(title="ف", elements=[Paragraph("نص فيه [^ghost] بلا حاشية", "p")])
     out = tmp_path / "ghost.epub"
-    build_reflow_epub(Book(title="ك", chapters=[chapter]), out, tmp_path, font_files=[])
+    warnings: list[str] = []
+    build_reflow_epub(Book(title="ك", chapters=[chapter]), out, tmp_path, font_files=[],
+                      on_warning=warnings.append)
     chap = zipfile.ZipFile(out).read("OEBPS/text/chap_001.xhtml").decode("utf-8")
-    assert "ghost" not in chap and "<sup>" not in chap   # no fabricated marker
+    assert "[^ghost]" in chap          # kept verbatim, not deleted
+    assert "<sup>" not in chap         # but no fabricated note marker
+    assert any("ghost" in w for w in warnings)
     xml.dom.minidom.parseString(chap)
 
 
@@ -352,3 +364,59 @@ def test_full_chain_to_epub(tmp_path):
     assert "<h3>" in chap
     assert "figure" in chap  # the embedded scan
     xml.dom.minidom.parseString(chap)  # well-formed XHTML
+
+
+# --- inline escaping (position-aware, not just line-start) ---------------------
+
+def test_inline_footnote_marker_survives_round_trip():
+    """A literal `[^1]` mid-paragraph used to be deleted from the book.
+
+    `_NEEDS_ESCAPE` only guards the start of a line, so the marker reached the
+    parser as a real noteref and the renderer dropped it for having no
+    definition. It is now escaped by position and comes back verbatim.
+    """
+    original = "قال المؤلف [^1] وهذا نص مهم"
+    md = "\n".join(emit_elements([("p", original)], 0))
+    assert md != original, "the marker must be escaped on the way out"
+    book = markdown_to_book(md, title="ك", author="", language="ar", split_every=10)
+    assert book.chapters[0].elements[0].text == original
+
+
+def test_generated_refs_are_not_escaped():
+    """Our own `[^p1-1]` refs must stay live refs, not become literal text."""
+    md = "\n".join(emit_elements([("p", "متن فيه [^p1-1] إشارة"), ("footnote", "نص الحاشية")], 0))
+    assert r"\[^p1-1]" not in md
+    assert "[^p1-1]" in md
+    book = markdown_to_book(md, title="ك", author="", language="ar", split_every=10)
+    assert "[^p1-1]" in book.chapters[0].elements[0].text
+
+
+@pytest.mark.parametrize("kind", ["p", "h1", "h2", "h3", "ul", "ol", "verse", "quran"])
+def test_inline_marker_escaped_in_every_element_kind(kind):
+    original = "نص فيه [^x] علامة"
+    md = "\n".join(emit_elements([(kind, original)], 0))
+    book = markdown_to_book(md, title="ك", author="", language="ar", split_every=10)
+    texts = [el.text for ch in book.chapters for el in ch.elements if hasattr(el, "text")]
+    assert original in texts
+
+
+def test_marker_at_line_start_survives_double_escaping():
+    """`_escape_inline` adds a backslash that `_NEEDS_ESCAPE` then guards again."""
+    original = "[^1] هذه فقرة تبدأ بعلامة"
+    md = "\n".join(emit_elements([("p", original)], 0))
+    book = markdown_to_book(md, title="ك", author="", language="ar", split_every=10)
+    assert book.chapters[0].elements[0].text == original
+
+
+def test_inline_marker_reaches_the_epub_as_visible_text(tmp_path):
+    from pdf2ebook.book import Book, Chapter
+
+    original = "علامة [^1] في المتن"
+    md = "\n".join(emit_elements([("p", original)], 0))
+    book = markdown_to_book(md, title="ك", author="", language="ar", split_every=10)
+    assert isinstance(book, Book) and isinstance(book.chapters[0], Chapter)
+    out = tmp_path / "marker.epub"
+    build_reflow_epub(book, out, tmp_path, font_files=[])
+    chap = zipfile.ZipFile(out).read("OEBPS/text/chap_001.xhtml").decode("utf-8")
+    assert "[^1]" in chap
+    xml.dom.minidom.parseString(chap)

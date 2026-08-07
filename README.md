@@ -33,6 +33,18 @@ for free, with no cloud upload.
 - **Auto mode (default)** — uses the PDF's own text layer when it exists *and is healthy*
   (many books embed a broken one — we detect that), OCRs the rest, and keeps
   photos/maps/failed pages as cleaned images so you never get garbage text.
+  The decision is made **once for the whole book**: if the embedded text is broken on
+  a quarter of the measurable pages, every page is re-read by OCR, so you never get a
+  book whose chapters look like two different books.
+- **An honest report** — every run tells you how each page was handled, how much of its
+  text survived structuring, and *what it cost*: a page that lost its font metrics, or
+  had to be rebuilt as plain paragraphs to avoid dropping text, says so. Full detail lands
+  in `report.json` next to the work dir.
+- **Never silently loses text** — when structuring a page would drop more than a fifth of
+  it, the page is rebuilt as plain paragraphs instead (`--no-structure-fallback` to opt out).
+  Structure is worth losing; words are not.
+- **Reproducible output** — the same PDF always produces a byte-identical EPUB, so you can
+  tell whether a rebuild actually changed your book. `--book-id` pins the identifier.
 - **Huge books welcome** — pages stream one at a time (a 2,400-page book converts in
   constant memory), every stage is cached and resumable, and output can be split into volumes.
 - **Local web page** — `pdf2ebook ui` opens a friendly bilingual drag-and-drop page in your
@@ -85,7 +97,12 @@ pdf2ebook convert book.pdf --mode image --device xteink-x4 --cbz
 pdf2ebook convert big-book.pdf --split-volumes 4
 pdf2ebook send book.epub --host 192.168.1.50
 pdf2ebook devices                           # list device profiles
+pdf2ebook convert book.pdf --markdown-out book.md   # correct the text by hand…
+pdf2ebook build book.md                             # …then rebuild the EPUB
 ```
+
+If a conversion fails, the message names the reason: a password-protected PDF says so
+(remove the password and retry) rather than reporting a generic read error.
 
 ## 🎯 OCR accuracy on old prints
 

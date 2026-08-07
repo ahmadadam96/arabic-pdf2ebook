@@ -2,20 +2,42 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from xml.sax.saxutils import escape
 
 
 _LANGUAGE_TAG_RE = re.compile(r"^[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*$")
+
+#: Fixed namespace for :func:`stable_book_id`. Never change it: it would give
+#: every previously built book a new identifier.
+_BOOK_NAMESPACE = uuid.UUID("6f3a1e2c-9b47-5d80-a1f2-7c5e0d94b613")
+
+#: EPUB 3 requires ``dcterms:modified``, but a real clock makes every build
+#: differ, which defeats byte-identical output. We stamp a fixed value (the
+#: reproducible-builds convention) and let callers pass a real one when they
+#: actually need publication metadata.
+FIXED_MODIFIED = "1980-01-01T00:00:00Z"
 
 
 def safe_language_tag(language: str) -> str:
     """Return a conservative, safe BCP-47-like tag for EPUB metadata."""
     language = language.strip()
     return language if _LANGUAGE_TAG_RE.fullmatch(language) else "und"
+
+
+def stable_book_id(title: str, author: str, language: str, content: str = "") -> str:
+    """A `urn:uuid:` identifier derived from the book itself, not from a clock.
+
+    The same input always yields the same identifier, so a rebuild produces
+    byte-identical output; changing the text yields a new one, which is the
+    correct EPUB semantics for a new revision. Pass ``--book-id`` to pin it.
+    """
+    digest = hashlib.sha256(content.encode("utf-8")).hexdigest() if content else ""
+    key = "\x1f".join((title, author, language, digest))
+    return f"urn:uuid:{uuid.uuid5(_BOOK_NAMESPACE, key)}"
 
 
 @dataclass(frozen=True)
@@ -36,10 +58,11 @@ def build_opf(
     pre_paginated: bool = False,
     viewport: tuple[int, int] | None = None,
     cover_id: str | None = None,
+    modified: str | None = None,
 ) -> str:
-    book_id = book_id or f"urn:uuid:{uuid.uuid4()}"
+    book_id = book_id or stable_book_id(title, author, language)
     language = safe_language_tag(language)
-    modified = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    modified = modified or FIXED_MODIFIED
 
     meta_extra = ""
     if pre_paginated:

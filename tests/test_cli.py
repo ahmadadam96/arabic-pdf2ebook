@@ -82,7 +82,8 @@ def test_convert_rejects_output_inside_cleaned_workdir(tiny_pdf, tmp_path):
         "convert", str(tiny_pdf), str(out), "--mode", "image",
         "--work-dir", str(wd), "--clean",
     ])
-    assert result.exit_code == 1
+    # A bad path combination is a usage error (2), not a conversion failure (1).
+    assert result.exit_code == 2
     assert "Output path" in result.output
 
 

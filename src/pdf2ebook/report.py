@@ -41,12 +41,19 @@ class PageReport:
     dropped_chars: int = 0
     emitted_chars: int = 0
     coverage: float = 1.0
+    # Recoverable quality losses on this page (missing font metrics, skipped
+    # lines, a structure fallback). The conversion succeeded; these say what it
+    # cost. Nothing in the pipeline may degrade output without leaving one here.
+    notes: list[str] = field(default_factory=list)
 
 
 @dataclass
 class ConversionReport:
     pages: list[PageReport] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    # Why the book as a whole did or did not use the PDF's embedded text layer.
+    # One verdict per book — see ocrmode._select_text_layer.
+    book_verdict: str = ""
 
     @property
     def book_coverage(self) -> float:
@@ -60,17 +67,27 @@ class ConversionReport:
             counts[page.route] = counts.get(page.route, 0) + 1
         return counts
 
+    def degraded_pages(self) -> list[PageReport]:
+        """Pages that produced output but lost something doing it."""
+        return [p for p in self.pages if p.notes]
+
     def to_json(self) -> str:
         return json.dumps(
-            {"pages": [asdict(p) for p in self.pages], "warnings": self.warnings},
+            {"pages": [asdict(p) for p in self.pages], "warnings": self.warnings,
+             "book_verdict": self.book_verdict},
             ensure_ascii=False,
         )
 
     @classmethod
     def from_json(cls, blob: str) -> "ConversionReport":
         data = json.loads(blob)
-        pages = [PageReport(**p) for p in data.get("pages", [])]
-        return cls(pages=pages, warnings=list(data.get("warnings", [])))
+        # Tolerate reports written by older versions: unknown keys are ignored
+        # and absent ones fall back to the dataclass defaults.
+        fields = {f for f in PageReport.__dataclass_fields__}
+        pages = [PageReport(**{k: v for k, v in p.items() if k in fields})
+                 for p in data.get("pages", [])]
+        return cls(pages=pages, warnings=list(data.get("warnings", [])),
+                   book_verdict=data.get("book_verdict", ""))
 
 
 def coverage_key(text: str) -> str:

@@ -1,0 +1,5 @@
+pages: 2
+has_text_layer: True
+text_layer_usable: True
+book_verdict: الطبقة النصية مقبولة (عينة صغيرة: 1 صفحة قابلة للقياس) — text layer accepted on a small sample of 1 measurable page(s).
+recommendation: Usable text layer found: '--mode auto' will extract it directly where healthy.

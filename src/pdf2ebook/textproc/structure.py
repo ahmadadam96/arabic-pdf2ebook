@@ -23,12 +23,39 @@ DropLine = Callable[[str, bool], bool]  # (line_text, is_page_edge) -> drop?
 Element = tuple[str, str]
 
 
-def structure_page(page: OcrPage, keep_diacritics: bool, drop_line: DropLine,
-                   body_size: float = 0.0) -> list[Element]:
+def _kept_lines(page: OcrPage, keep_diacritics: bool, drop_line: DropLine) -> list:
+    """Visible lines minus junk, using the page-edge rule the whole pipeline shares.
+
+    `report._page_char_counts` measures coverage against exactly this set, so the
+    two must stay in step: a line dropped here counts as junk, not as lost text.
+    """
     visible = [ln for ln in page.lines if ln.text.strip()]
-    kept = [ln for i, ln in enumerate(visible)
+    return [ln for i, ln in enumerate(visible)
             if not drop_line(clean.normalize_arabic(ln.text, keep_diacritics),
                              i < 2 or i >= len(visible) - 2)]
+
+
+def structure_page_flat(page: OcrPage, keep_diacritics: bool,
+                        drop_line: DropLine) -> list[Element]:
+    """One paragraph per kept line. No merging, no verse/list/heading detection.
+
+    The fallback for when the smart builder above drops too much of a page: it
+    loses structure but cannot lose text, because every line it keeps is emitted
+    verbatim. `run_text_mode` swaps to it when a page's measured coverage falls
+    below `report.PAGE_COVERAGE_MIN` — the safety net that makes the coverage
+    number an actuator rather than just a warning.
+    """
+    out: list[Element] = []
+    for line in _kept_lines(page, keep_diacritics, drop_line):
+        text = clean.normalize_arabic(line.text, keep_diacritics)
+        if text:
+            out.append(("p", text))
+    return out
+
+
+def structure_page(page: OcrPage, keep_diacritics: bool, drop_line: DropLine,
+                   body_size: float = 0.0) -> list[Element]:
+    kept = _kept_lines(page, keep_diacritics, drop_line)
     filtered = OcrPage(page_no=page.page_no, size=page.size, lines=kept)
 
     verse_idx = poetry.detect_verse_lines(filtered)

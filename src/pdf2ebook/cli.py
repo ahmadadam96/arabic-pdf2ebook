@@ -15,6 +15,7 @@ from rich.table import Table
 from . import __version__
 from .config import EpubMeta, ImageOptions, OcrOptions, PipelineOptions, validate_pipeline_options
 from .devices import DEFAULT_PROFILE, PROFILES
+from .errors import InvalidOptionError, Pdf2EbookError
 from .pdfio import PdfError
 
 app = typer.Typer(
@@ -86,6 +87,14 @@ def convert(
     footnotes: bool = typer.Option(
         True, "--footnotes/--no-footnotes",
         help="Detect footnote blocks and link them (popup notes on modern readers)"),
+    structure_fallback: bool = typer.Option(
+        True, "--structure-fallback/--no-structure-fallback",
+        help="Rebuild a page as plain paragraphs when structuring would drop too much "
+             "of its text (keeps text, loses structure)"),
+    book_id: Optional[str] = typer.Option(
+        None, "--book-id",
+        help="Pin the EPUB identifier (default: derived from the book, so rebuilds "
+             "of the same text are byte-identical)"),
     markdown_out: Optional[Path] = typer.Option(
         None, "--markdown-out",
         help="Also write the editable Markdown (with a scans/ folder) next to the EPUB; "
@@ -99,6 +108,7 @@ def convert(
         mode=mode, text_layer=text_layer, dpi=dpi, pages=pages, preshape=preshape,
         split_volumes=split_volumes, split_every=split_every,
         font=font, work_dir=work_dir, force=force, clean=clean, footnotes=footnotes,
+        structure_fallback=structure_fallback, book_id=book_id,
         markdown_out=markdown_out or debug_markdown,
         ocr=OcrOptions(engine=engine, lang=lang, psm=psm, min_conf=min_conf,
                        rescue=rescue, strip_patterns=list(strip_pattern)),
@@ -110,8 +120,8 @@ def convert(
         validate_pipeline_options(opts)
         if opts.mode == "image" and device not in PROFILES:
             valid = ", ".join(sorted(PROFILES))
-            raise ValueError(f"device must be one of: {valid}")
-    except ValueError as exc:
+            raise InvalidOptionError(f"device must be one of: {valid}")
+    except InvalidOptionError as exc:
         console.print(f"[red]Invalid option:[/red] {exc}")
         raise typer.Exit(2)
     out_path = output or pdf.with_suffix(".epub")
@@ -139,8 +149,11 @@ def convert(
                 from .ocrmode import run_text_mode
 
                 result = run_text_mode(pdf, out_path, opts, on_progress)
-    except (PdfError, RuntimeError, ValueError) as exc:
-        console.print(f"[red]Error:[/red] {exc}")
+    except InvalidOptionError as exc:
+        console.print(f"[red]Invalid option:[/red] {exc}")
+        raise typer.Exit(2)
+    except Pdf2EbookError as exc:
+        console.print(f"[red]Error ({exc.code}):[/red] {exc}")
         raise typer.Exit(1)
 
     console.print()
@@ -158,6 +171,10 @@ def convert(
             console.print(f"  mean OCR confidence: {avg:.0f}")
         if result.stripped_lines:
             console.print(f"  removed repeated watermark/header lines: {len(result.stripped_lines)}")
+        if result.pages_structure_fallback:
+            console.print(
+                f"  بناء مسطح احتياطي — structure fallback used on "
+                f"{result.pages_structure_fallback} page(s) to avoid losing text")
         if result.report is not None:
             _print_report(result.report)
 
@@ -171,8 +188,11 @@ _ROUTE_LABELS = {
 }
 
 
+_MAX_DEGRADED_SHOWN = 5
+
+
 def _print_report(report) -> None:
-    """Render the per-run conversion report (route counts, coverage, warnings)."""
+    """Render the per-run conversion report (verdict, routes, coverage, losses)."""
     counts = report.route_counts()
     if counts:
         table = Table(title="تقرير التحويل — Conversion report")
@@ -181,7 +201,21 @@ def _print_report(report) -> None:
         for route, n in counts.items():
             table.add_row(_ROUTE_LABELS.get(route, route), str(n))
         console.print(table)
+    if report.book_verdict:
+        # One verdict for the whole book — the user should see this before
+        # discovering, page by page, that half the text came from elsewhere.
+        console.print(f"  الطبقة النصية — text layer: {report.book_verdict}")
     console.print(f"  تغطية النص — text coverage: {round(report.book_coverage * 100)}%")
+
+    degraded = report.degraded_pages()
+    if degraded:
+        console.print(
+            f"  [yellow]صفحات فقدت شيئًا — pages that lost something: {len(degraded)}[/yellow]")
+        for page in degraded[:_MAX_DEGRADED_SHOWN]:
+            console.print(f"    صفحة {page.page_no + 1}: {page.notes[0]}")
+        if len(degraded) > _MAX_DEGRADED_SHOWN:
+            extra = len(degraded) - _MAX_DEGRADED_SHOWN
+            console.print(f"    …و{extra} أخرى — and {extra} more (see report.json)")
     for warning in report.warnings:
         console.print(f"[yellow]⚠[/yellow] {warning}")
 
@@ -198,25 +232,31 @@ def build(
     font: str = typer.Option("amiri", help="Embedded font: amiri | none"),
     preshape: bool = typer.Option(
         False, "--preshape", help="Bake Arabic letter-joining (simple readers like CrossPoint only)"),
+    book_id: Optional[str] = typer.Option(
+        None, "--book-id", help="Pin the EPUB identifier across rebuilds"),
 ) -> None:
     """Build (or rebuild) an EPUB from a Markdown file — the reverse of `convert --markdown-out`."""
-    from .buildmd import BuildError, run_build
+    from .buildmd import run_build
 
     out_path = output or markdown.with_suffix(".epub")
     opts = PipelineOptions(
         split_every=split_every, split_volumes=split_volumes, font=font, preshape=preshape,
+        book_id=book_id,
     )
     try:
         validate_pipeline_options(opts)
-    except ValueError as exc:
+    except InvalidOptionError as exc:
         console.print(f"[red]Invalid option:[/red] {exc}")
         raise typer.Exit(2)
     warnings: list[str] = []
     try:
         result = run_build(markdown, out_path, opts, cli_title=title, cli_author=author,
                            cli_language=language, on_warning=warnings.append)
-    except BuildError as exc:
-        console.print(f"[red]Error:[/red] {exc}")
+    except InvalidOptionError as exc:
+        console.print(f"[red]Invalid option:[/red] {exc}")
+        raise typer.Exit(2)
+    except Pdf2EbookError as exc:
+        console.print(f"[red]Error ({exc.code}):[/red] {exc}")
         raise typer.Exit(1)
 
     for warning in warnings:
@@ -314,7 +354,7 @@ def send(
 
     try:
         target = send_to_reader(epub, host)
-    except Exception as exc:
+    except (Pdf2EbookError, OSError, RuntimeError) as exc:
         console.print(f"[red]Upload failed:[/red] {exc}")
         console.print("Make sure the reader's Wi-Fi transfer mode is on and you are on the same network.")
         raise typer.Exit(1)
@@ -346,7 +386,7 @@ def fonts_install(
 
     try:
         used_host, count, method = install_fonts_on_reader(host)
-    except Exception as exc:
+    except (Pdf2EbookError, OSError, RuntimeError) as exc:
         console.print(f"[red]Font install failed:[/red] {exc}")
         console.print("Make sure the reader's Wi-Fi transfer mode is on and you are on the same network.")
         raise typer.Exit(1)

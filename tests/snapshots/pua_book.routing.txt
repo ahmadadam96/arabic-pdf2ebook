@@ -1,0 +1,5 @@
+pages: 2
+has_text_layer: True
+text_layer_usable: False
+book_verdict: الطبقة النصية مقبولة (عينة صغيرة: 1 صفحة قابلة للقياس) — text layer accepted on a small sample of 1 measurable page(s).
+recommendation: Text layer is missing or unhealthy: use '--mode auto' (OCR/image fallback) or '--mode image'.

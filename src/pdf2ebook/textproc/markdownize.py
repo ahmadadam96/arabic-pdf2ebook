@@ -29,6 +29,7 @@ from __future__ import annotations
 import re
 from typing import Callable
 
+from .. import limits
 from ..book import Book, Chapter, PageImage, Paragraph
 from . import clean
 from .footnotes import footnote_id
@@ -55,6 +56,45 @@ _NEEDS_ESCAPE = re.compile(
 _HEAD_PREFIX = {"h1": "# ", "h2": "## ", "h3": "### "}
 _HEAD_LEVEL = {"h1": 1, "h2": 2, "h3": 3}
 _REF_RE = re.compile(r"\[\^([^\]\s]+)\]")
+
+# Refs this package generates, from footnotes.footnote_id: `[^p<page>-<n>]`.
+# Anything else shaped like a ref is literal text and gets escaped on the way
+# out — see _escape_inline.
+_GENERATED_REF_RE = re.compile(r"\[\^p\d+-\d+\]")
+_MARKER_OPEN_RE = re.compile(r"\[\^")
+
+
+def _escape_inline(text: str) -> str:
+    """Escape footnote-ref syntax anywhere in a line, except our own real refs.
+
+    `_NEEDS_ESCAPE` only guards the *start* of a line, so a literal `[^1]` in the
+    middle of a paragraph used to survive emit, parse back as an inline noteref,
+    and then be deleted by the EPUB renderer for having no definition — silent
+    text loss. Escaping by position (not just at line start) is the same split
+    anydoc draws between its block and inline escape contexts.
+    """
+    if "[^" not in text:
+        return text
+    out: list[str] = []
+    i = 0
+    for match in _MARKER_OPEN_RE.finditer(text):
+        if match.start() < i:
+            continue  # inside a ref already copied verbatim
+        out.append(text[i:match.start()])
+        generated = _GENERATED_REF_RE.match(text, match.start())
+        if generated:
+            out.append(generated.group(0))
+            i = generated.end()
+        else:
+            out.append("\\[^")
+            i = match.end()
+    out.append(text[i:])
+    return "".join(out)
+
+
+def _unescape_inline(text: str) -> str:
+    """Inverse of :func:`_escape_inline`."""
+    return text.replace("\\[^", "[^")
 
 
 # ---------------------------------------------------------------------------
@@ -108,6 +148,12 @@ def emit_scan(image_rel: str) -> str:
 
 
 def emit_elements(elements: list[Element], page_no: int = 0) -> list[str]:
+    """Serialize typed elements to Markdown lines.
+
+    Escaping runs inline-first, then line-start: `_escape_inline` may itself
+    introduce a leading backslash, which `_NEEDS_ESCAPE` then guards, and the
+    parse side unwinds them in the same order.
+    """
     lines: list[str] = []
     note_ordinal = 0
     i, n = 0, len(elements)
@@ -117,22 +163,23 @@ def emit_elements(elements: list[Element], page_no: int = 0) -> list[str]:
             lines.append(f":::{kind}")
             j = i
             while j < n and elements[j][0] == kind:
-                lines.append(elements[j][1])
+                lines.append(_escape_inline(elements[j][1]))
                 j += 1
             lines.append(":::")
             i = j
             continue
         if kind == "footnote":
             note_ordinal += 1
-            lines.append(f"[^{footnote_id(page_no, note_ordinal)}]: {text}")
+            lines.append(f"[^{footnote_id(page_no, note_ordinal)}]: {_escape_inline(text)}")
         elif kind in _HEAD_PREFIX:
-            lines.append(_HEAD_PREFIX[kind] + text)
+            lines.append(_HEAD_PREFIX[kind] + _escape_inline(text))
         elif kind == "ul":
-            lines.append(f"- {text}")
+            lines.append(f"- {_escape_inline(text)}")
         elif kind == "ol":
-            lines.append(f"1. {text}")
+            lines.append(f"1. {_escape_inline(text)}")
         else:  # paragraph
-            lines.append(f"\\{text}" if _NEEDS_ESCAPE.match(text) else text)
+            escaped = _escape_inline(text)
+            lines.append(f"\\{escaped}" if _NEEDS_ESCAPE.match(escaped) else escaped)
         i += 1
     return lines
 
@@ -229,12 +276,17 @@ def _parse_items(md: str, warn: Warn | None = None) -> list[tuple[int, str, str,
             continue
         items.append((cur_page, "p", text, ""))
         i += 1
-    return items
+    # Unwind inline escaping last, so an escaped marker can never be mistaken
+    # for structure while the lines are still being classified above.
+    return [(page, kind, text if kind == "img" else _unescape_inline(text), note_id)
+            for page, kind, text, note_id in items]
 
 
 def markdown_to_book(md: str, *, title: str, author: str, language: str,
                      split_every: int, on_warning: Warn | None = None) -> Book:
     items = _parse_items(md, on_warning)
+    limits.check("max_elements_per_book", len(items), limits.MAX_ELEMENTS_PER_BOOK,
+                 "the Markdown source is larger than one book.")
 
     # Chapter break level = the shallowest heading tier present; deeper tiers
     # become in-body headings. Mirrors the heading-count≥2 vs split_every rule.

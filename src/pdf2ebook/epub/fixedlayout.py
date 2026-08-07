@@ -13,12 +13,12 @@ from typing import Callable
 
 from PIL import Image
 
-from .opf import ManifestItem, build_ncx, build_nav, build_opf
+from ..errors import InvalidOptionError
+from ..limits import FIXED_LAYOUT_JPEG_QUALITY as JPEG_QUALITY
+from .opf import ManifestItem, build_ncx, build_nav, build_opf, stable_book_id
 from .templates import IMAGE_CSS, xhtml_page
 from .validate import validate_epub
 from .zipwriter import EpubContainer
-
-JPEG_QUALITY = 75
 
 
 def _encode_page(src: Path, style: str) -> tuple[bytes, str, str]:
@@ -46,7 +46,7 @@ def build_image_epub(
     progress: Callable[[int], None] | None = None,
 ) -> Path:
     if not page_paths:
-        raise ValueError("Cannot build an image EPUB without page images")
+        raise InvalidOptionError("Cannot build an image EPUB without page images")
 
     pre_paginated = layout == "fixed"
     book_id = None
@@ -94,9 +94,9 @@ def build_image_epub(
         if not toc:
             toc = [(title, "pages/page_0001.xhtml")]
 
-        import uuid
-
-        book_id = f"urn:uuid:{uuid.uuid4()}"
+        # Derived from the page set, so rebuilding the same book is byte-identical.
+        book_id = stable_book_id(title, author, language,
+                                 "\n".join(p.name for p in page_paths))
         epub.add("OEBPS/nav.xhtml", build_nav(title, language, toc))
         epub.add("OEBPS/toc.ncx", build_ncx(title, book_id, toc))
         epub.add(

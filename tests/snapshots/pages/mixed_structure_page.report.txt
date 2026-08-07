@@ -1,0 +1,4 @@
+verdict: 
+coverage: 0.98
+
+page 1: route=text-layer coverage=0.97 src=242 dropped=0 emitted=236

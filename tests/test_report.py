@@ -50,21 +50,21 @@ def _line(text: str) -> OcrLine:
 
 def test_select_text_layer_keeps_healthy_pages():
     samples = {0: "وكان المسلمون بالأندلس يستنجدون بسلاطين المغرب", 1: "نص عربي سليم وواضح تماما"}
-    allowed, reasons = _select_text_layer(samples, "auto")
+    allowed, reasons, _ = _select_text_layer(samples, "auto")
     assert allowed == {0, 1}
     assert reasons == {}
 
 
 def test_select_text_layer_drops_bad_glyph_page():
     samples = {0: "نص عربي سليم وواضح", 1: " نص"}
-    allowed, reasons = _select_text_layer(samples, "auto")
+    allowed, reasons, _ = _select_text_layer(samples, "auto")
     assert 0 in allowed and 1 not in allowed
     assert 1 in reasons and "bad glyph" in reasons[1].lower()
 
 
 def test_select_text_layer_always_bypasses_gates():
     samples = {0: ""}  # pure PUA, would normally be dropped
-    allowed, reasons = _select_text_layer(samples, "always")
+    allowed, reasons, _ = _select_text_layer(samples, "always")
     assert allowed == {0}
     assert reasons == {}
 
@@ -72,7 +72,7 @@ def test_select_text_layer_always_bypasses_gates():
 def test_select_text_layer_corruption_discards_whole_layer():
     corrupted = "وأنت الخر ل شيء بعدك وأنت الفردا ل شريك لك السإلمية يا واهب العقول " * 10
     samples = {0: corrupted, 1: corrupted}
-    allowed, reasons = _select_text_layer(samples, "auto")
+    allowed, reasons, _ = _select_text_layer(samples, "auto")
     assert allowed == set()
     assert set(reasons) == {0, 1}
 
@@ -80,7 +80,7 @@ def test_select_text_layer_corruption_discards_whole_layer():
 def test_select_text_layer_drops_only_corrupted_pages():
     healthy = "نص عربي سليم وواضح في صفحة قصيرة لكنها صالحة"
     corrupted = "وأنت الخر ل شيء بعدك وأنت الفردا ل شريك لك السإلمية يا واهب العقول " * 10
-    allowed, reasons = _select_text_layer({0: healthy, 1: corrupted}, "auto")
+    allowed, reasons, _ = _select_text_layer({0: healthy, 1: corrupted}, "auto")
     assert allowed == {0}
     assert set(reasons) == {1}
 
@@ -158,3 +158,89 @@ def test_collect_warnings_ignores_near_empty_pages():
         PageReport(1, ROUTE_OCR, "OCR", 90.0, source_chars=10, emitted_chars=2, coverage=0.20),
     ])
     assert collect_warnings(report) == []
+
+
+# --- book-level text-layer verdict ---------------------------------------------
+
+def _long(text: str, words: int = 60) -> str:
+    """A page long enough for the ligature-loss signal to be statistically valid."""
+    return " ".join([text] * (words // max(1, len(text.split())) + 1))
+
+
+CORRUPT = _long("وأنت الخر ل شيء بعدك وأنت الفردا ل شريك لك السإلمية يا واهب العقول")
+HEALTHY = _long("وقد ذكر أهل السير أن القوم نزلوا بهذا الوادي وأقاموا فيه دهرا طويلا")
+
+
+def test_corrupt_majority_rejects_text_layer_book_wide():
+    """A book that is mostly corrupt goes to OCR *whole*.
+
+    Interleaving clean OCR pages with corrupt extracted ones is the single
+    biggest source of a book that reads like two different books.
+    """
+    samples = {0: CORRUPT, 1: CORRUPT, 2: CORRUPT, 3: HEALTHY}
+    allowed, reasons, verdict = _select_text_layer(samples, "auto")
+    assert allowed == set(), "no page may use the text layer once the book is rejected"
+    assert set(reasons) == set(samples)
+    assert "book-wide" in verdict
+
+
+def test_healthy_majority_keeps_text_layer_and_demotes_only_bad_pages():
+    samples = {0: HEALTHY, 1: HEALTHY, 2: HEALTHY, 3: CORRUPT}
+    allowed, reasons, verdict = _select_text_layer(samples, "auto")
+    assert allowed == {0, 1, 2}
+    assert set(reasons) == {3}
+    assert "accepted" in verdict
+
+
+def test_short_page_follows_the_book_verdict_not_its_own():
+    """The regression this whole verdict exists for.
+
+    `looks_corrupted_arabic` needs ~40 words, so a sparse heading page can
+    never be judged on its own. It used to sail through the per-page gate and
+    land corrupt text next to clean OCR; now it follows the book.
+    """
+    short_corrupt = "وأنت الخر ل شيء بعدك"          # too short to measure
+    samples = {0: CORRUPT, 1: CORRUPT, 2: CORRUPT, 3: short_corrupt}
+    allowed, _, _ = _select_text_layer(samples, "auto")
+    assert 3 not in allowed
+
+    # …and the mirror case: a healthy book keeps its sparse pages.
+    samples = {0: HEALTHY, 1: HEALTHY, 2: HEALTHY, 3: "عنوان الفصل الأول"}
+    allowed, _, _ = _select_text_layer(samples, "auto")
+    assert 3 in allowed
+
+
+def test_bad_glyphs_are_conclusive_at_any_length():
+    """PUA codepoints carry no meaning regardless of how few there are."""
+    samples = {0: HEALTHY, 1: HEALTHY, 2: HEALTHY, 3: "\ue001\ue002 \ue003"}
+    allowed, reasons, _ = _select_text_layer(samples, "auto")
+    assert 3 not in allowed
+    assert "bad glyph" in reasons[3].lower()
+
+
+def test_always_bypasses_the_book_verdict():
+    samples = {0: CORRUPT, 1: CORRUPT, 2: CORRUPT}
+    allowed, reasons, verdict = _select_text_layer(samples, "always")
+    assert allowed == set(samples) and reasons == {}
+    assert "forced" in verdict
+
+
+# --- degradation ledger --------------------------------------------------------
+
+def test_page_report_carries_notes_through_json():
+    report = ConversionReport(book_verdict="ok", pages=[
+        PageReport(page_no=0, route=ROUTE_TEXT, notes=["font size missing for 3/10 chars"]),
+        PageReport(page_no=1, route=ROUTE_TEXT),
+    ])
+    restored = ConversionReport.from_json(report.to_json())
+    assert restored.book_verdict == "ok"
+    assert restored.pages[0].notes == ["font size missing for 3/10 chars"]
+    assert [p.page_no for p in restored.degraded_pages()] == [0]
+
+
+def test_from_json_tolerates_reports_written_by_older_versions():
+    legacy = '{"pages": [{"page_no": 0, "route": "ocr", "coverage": 0.9, "gone": 1}]}'
+    restored = ConversionReport.from_json(legacy)
+    assert restored.pages[0].coverage == 0.9
+    assert restored.pages[0].notes == []
+    assert restored.book_verdict == ""

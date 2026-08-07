@@ -13,14 +13,16 @@ from typing import Callable
 from .book import Book, PageImage
 from .config import PipelineOptions
 from .epub.reflow import build_reflow_epub
+from .errors import MissingAssetError, Pdf2EbookError, SourceUnreadableError
 from .pipeline import ConversionResult, Progress, _volume_chunks, _volume_path, default_title
 from .textproc.markdownize import markdown_to_book, parse_front_matter
 
 Warn = Callable[[str], None]
 
-
-class BuildError(RuntimeError):
-    """Raised when a Markdown file cannot be built into an EPUB."""
+#: Backwards-compatible name for "a build failed". The specific reason now
+#: arrives as a typed subclass (:class:`SourceUnreadableError`,
+#: :class:`MissingAssetError`, …) carrying a machine-readable ``code``.
+BuildError = Pdf2EbookError
 
 
 def _missing_scans(book: Book, work_root: Path) -> list[str]:
@@ -48,7 +50,7 @@ def run_build(
     from .ocrmode import _element_weight, apply_preshape, finalize_chapters, resolve_fonts
 
     if not md_path.exists():
-        raise BuildError(f"File not found — الملف غير موجود: {md_path}")
+        raise SourceUnreadableError(f"File not found — الملف غير موجود: {md_path}")
 
     text = md_path.read_text(encoding="utf-8-sig")  # tolerate a UTF-8 BOM
     front, body = parse_front_matter(text)
@@ -66,7 +68,7 @@ def run_build(
     missing = _missing_scans(book, work_root)
     if missing:
         listed = ", ".join(missing[:10])
-        raise BuildError(
+        raise MissingAssetError(
             "Missing scan image(s) referenced by the Markdown — "
             f"صور ناقصة مشار إليها في الملف: {listed}. "
             "Keep the scans/ folder next to the .md file."
@@ -85,7 +87,8 @@ def run_build(
         vol_out = _volume_path(out_path, vol, len(chunks))
         vol_book = Book(title=vol_title, author=book.author, language=book.language,
                         chapters=chunk)
-        build_reflow_epub(vol_book, vol_out, work_root, font_files)
+        build_reflow_epub(vol_book, vol_out, work_root, font_files,
+                          book_id=opts.book_id, on_warning=on_warning)
         result.outputs.append(vol_out)
         if progress:
             progress("epub", vol + 1, len(chunks))

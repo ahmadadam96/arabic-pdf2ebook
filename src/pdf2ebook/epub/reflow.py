@@ -4,20 +4,22 @@ from __future__ import annotations
 
 import io
 import re
-import uuid
 from pathlib import Path
+from typing import Callable
 from xml.sax.saxutils import escape
 
 from PIL import Image
 
+from .. import limits
 from ..book import Book, Chapter, PageImage, Paragraph
-from .opf import ManifestItem, build_ncx, build_nav, build_opf
+from ..errors import MissingAssetError
+from ..limits import JPEG_QUALITY, MAX_EMBED_HEIGHT
+from .opf import ManifestItem, build_ncx, build_nav, build_opf, stable_book_id
 from .templates import FONT_FACE_CSS, REFLOW_CSS, xhtml_page
 from .validate import validate_epub
 from .zipwriter import EpubContainer
 
-MAX_EMBED_HEIGHT = 1024
-JPEG_QUALITY = 70
+Warn = Callable[[str], None]
 
 _NOTEREF_RE = re.compile(r"\[\^([^\]\s]+)\]")
 _ARABIC_DIGITS = "٠١٢٣٤٥٦٧٨٩"
@@ -30,7 +32,7 @@ def _num(n: int, language: str) -> str:
 
 
 def _chapter_xhtml(chapter: Chapter, work_root: Path, image_names: dict[int, str],
-                   language: str = "ar") -> str:
+                   language: str = "ar", on_warning: Warn | None = None) -> str:
     # Footnotes render together at the chapter end; number them in order and map
     # each note id → its display number so inline refs resolve.
     notes = [el for el in chapter.elements
@@ -52,7 +54,15 @@ def _chapter_xhtml(chapter: Chapter, work_root: Path, image_names: dict[int, str
         def repl(m: re.Match) -> str:
             nid = m.group(1)
             if nid not in note_order:
-                return ""  # ref with no matching note in this chapter → drop marker
+                # No matching note in this chapter. Never delete the marker: it
+                # may be literal text the author wrote (or OCR read), and dropping
+                # it silently removes characters from the book. Keep it visible
+                # and let the warning explain it.
+                if on_warning is not None:
+                    on_warning(
+                        f"مرجع حاشية بلا تعريف [^{nid}] بقي كنص — unresolved footnote "
+                        f"reference [^{nid}] kept as literal text")
+                return escape(m.group(0))
             referenced.add(nid)
             num = _num(note_order[nid], language)
             anchor = note_anchors[nid]
@@ -129,6 +139,10 @@ def _chapter_xhtml(chapter: Chapter, work_root: Path, image_names: dict[int, str
 
 
 def _encode_scan(src: Path) -> bytes:
+    if not src.exists():
+        raise MissingAssetError(
+            f"صورة الصفحة غير موجودة — page scan not found: {src}. "
+            "Keep the scans/ folder next to the Markdown file.")
     with Image.open(src) as img:
         img = img.convert("L")
         if img.height > MAX_EMBED_HEIGHT:
@@ -144,8 +158,12 @@ def build_reflow_epub(
     out_path: Path,
     work_root: Path,
     font_files: list[Path] | None = None,
+    book_id: str | None = None,
+    on_warning: Warn | None = None,
 ) -> Path:
-    book_id = f"urn:uuid:{uuid.uuid4()}"
+    # Derived from the book's own content, so a rebuild of the same text is
+    # byte-identical and a text change is a new revision. See stable_book_id.
+    book_id = book_id or stable_book_id(book.title, book.author, book.language, book.to_json())
     items: list[ManifestItem] = [
         ManifestItem("nav", "nav.xhtml", "application/xhtml+xml", "nav"),
         ManifestItem("ncx", "toc.ncx", "application/x-dtbncx+xml"),
@@ -177,6 +195,7 @@ def build_reflow_epub(
             (el.page_no for ch in book.chapters for el in ch.elements
              if isinstance(el, PageImage)), default=None,
         )
+        scan_bytes = 0
         for chapter in book.chapters:
             for el in chapter.elements:
                 if isinstance(el, PageImage) and el.page_no not in image_names:
@@ -186,14 +205,23 @@ def build_reflow_epub(
                     is_cover = el.page_no == first_image_page and el.page_no <= 1
                     if is_cover:
                         cover_id = item_id
-                    epub.add(f"OEBPS/{name}", _encode_scan(src))
+                    encoded = _encode_scan(src)
+                    # A book where OCR failed on every page embeds every page;
+                    # without this it silently grows past what a reader can open.
+                    scan_bytes += len(encoded)
+                    limits.check(
+                        "max_embedded_scan_bytes", scan_bytes, limits.MAX_EMBEDDED_SCAN_BYTES,
+                        "too many pages kept as images — check the conversion report, "
+                        "then lower --min-conf or improve the scan quality.")
+                    epub.add(f"OEBPS/{name}", encoded)
                     items.append(ManifestItem(item_id, name, "image/jpeg",
                                               "cover-image" if is_cover else ""))
                     image_names[el.page_no] = name
 
         for i, chapter in enumerate(book.chapters):
             name = f"text/chap_{i + 1:03d}.xhtml"
-            body = _chapter_xhtml(chapter, work_root, image_names, book.language)
+            body = _chapter_xhtml(chapter, work_root, image_names, book.language,
+                                  on_warning)
             heading = f"    <h2>{escape(chapter.title)}</h2>\n" if chapter.title else ""
             first = chapter.elements[0] if chapter.elements else None
             starts_with_heading = isinstance(first, Paragraph) and first.kind in ("h1", "h2", "h3")

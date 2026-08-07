@@ -8,13 +8,12 @@ from posixpath import normpath
 from urllib.parse import unquote, urlsplit
 from xml.etree import ElementTree
 
+from ..errors import EpubValidationError
+
+__all__ = ["EpubValidationError", "validate_epub"]
 
 _CONTAINER_NS = "urn:oasis:names:tc:opendocument:xmlns:container"
 _OPF_NS = "http://www.idpf.org/2007/opf"
-
-
-class EpubValidationError(ValueError):
-    """Raised when an EPUB archive has an invalid internal reference."""
 
 
 def _fail(message: str) -> None:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import xml.dom.minidom
 import zipfile
 from pathlib import Path, PurePosixPath
@@ -209,3 +210,82 @@ def test_reflow_epub_with_scan_fallback(tmp_path):
     assert any(n.startswith("OEBPS/images/scan_") for n in zf.namelist())
     # two chapters in spine and toc
     assert len([n for n in zf.namelist() if n.startswith("OEBPS/text/")]) == 2
+
+
+# --- reproducible output --------------------------------------------------------
+
+def test_same_book_produces_identical_epub_bytes(tmp_path):
+    """A rebuild that changed nothing must produce the same file.
+
+    Without this the EPUB carried a fresh uuid4 and a live clock in both the
+    zip entries and dcterms:modified, so every build differed and there was no
+    way to tell an actual content change from noise.
+    """
+    import hashlib
+
+    from pdf2ebook.book import Book, Chapter, Paragraph
+    from pdf2ebook.epub.reflow import build_reflow_epub
+
+    def build(name: str) -> str:
+        book = Book(title="كتاب", author="مؤلف", language="ar", chapters=[
+            Chapter(title="الفصل الأول", elements=[
+                Paragraph("الحمد لله رب العالمين.", "p"),
+                Paragraph("وبعد فهذا كتاب.", "p"),
+            ])])
+        out = tmp_path / name
+        build_reflow_epub(book, out, tmp_path, font_files=[])
+        return hashlib.sha256(out.read_bytes()).hexdigest()
+
+    assert build("a.epub") == build("b.epub")
+
+
+def test_changing_the_text_changes_the_identifier(tmp_path):
+    """A new revision should be a new EPUB identifier, not a silent overwrite."""
+    import zipfile
+
+    from pdf2ebook.book import Book, Chapter, Paragraph
+    from pdf2ebook.epub.reflow import build_reflow_epub
+
+    def identifier(text: str, name: str) -> str:
+        book = Book(title="كتاب", author="", language="ar",
+                    chapters=[Chapter(title="ف", elements=[Paragraph(text, "p")])])
+        out = tmp_path / name
+        build_reflow_epub(book, out, tmp_path, font_files=[])
+        opf = zipfile.ZipFile(out).read("OEBPS/content.opf").decode("utf-8")
+        return re.search(r'<dc:identifier id="bookid">([^<]+)</dc:identifier>', opf).group(1)
+
+    first = identifier("النص الأول.", "one.epub")
+    second = identifier("النص الثاني مختلف.", "two.epub")
+    assert first.startswith("urn:uuid:") and first != second
+
+
+def test_explicit_book_id_is_honoured(tmp_path):
+    import zipfile
+
+    from pdf2ebook.book import Book, Chapter, Paragraph
+    from pdf2ebook.epub.reflow import build_reflow_epub
+
+    book = Book(title="كتاب", author="", language="ar",
+                chapters=[Chapter(title="ف", elements=[Paragraph("نص.", "p")])])
+    out = tmp_path / "pinned.epub"
+    build_reflow_epub(book, out, tmp_path, font_files=[], book_id="urn:uuid:" + "0" * 8 +
+                      "-0000-0000-0000-000000000000")
+    opf = zipfile.ZipFile(out).read("OEBPS/content.opf").decode("utf-8")
+    assert "urn:uuid:00000000-0000-0000-0000-000000000000" in opf
+
+
+def test_zip_entries_carry_the_fixed_timestamp(tmp_path):
+    import zipfile
+
+    from pdf2ebook.book import Book, Chapter, Paragraph
+    from pdf2ebook.epub.reflow import build_reflow_epub
+    from pdf2ebook.epub.zipwriter import FIXED_TIMESTAMP
+
+    book = Book(title="ك", author="", language="ar",
+                chapters=[Chapter(title="ف", elements=[Paragraph("نص.", "p")])])
+    out = tmp_path / "stamped.epub"
+    build_reflow_epub(book, out, tmp_path, font_files=[])
+    with zipfile.ZipFile(out) as zf:
+        assert zf.infolist(), "empty archive"
+        for info in zf.infolist():
+            assert info.date_time == FIXED_TIMESTAMP, info.filename

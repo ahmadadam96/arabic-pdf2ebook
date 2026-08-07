@@ -18,6 +18,7 @@ import re
 from dataclasses import dataclass
 from statistics import median
 
+from .. import limits
 from ..ocr.base import OcrLine, OcrPage
 
 # Leading footnote marker: (١) ١- ١. ١) (1) 1- and superscript digits ¹²³…
@@ -98,6 +99,9 @@ def split_footnotes(page: OcrPage, body_size: float) -> tuple[OcrPage, list[Foot
             notes[-1] = Footnote(prev.label, f"{prev.text} {ln.text.strip()}".strip())
     if not notes:
         return page, []
+    limits.check("max_footnotes_per_page", len(notes), limits.MAX_FOOTNOTES_PER_PAGE,
+                 f"page {page.page_no + 1} — the footnote block detector latched "
+                 "onto body text.")
 
     kept = OcrPage(page_no=page.page_no, size=page.size, lines=visible[:start] + visible[end:])
     return kept, notes

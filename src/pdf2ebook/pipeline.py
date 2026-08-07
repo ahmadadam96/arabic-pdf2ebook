@@ -17,9 +17,11 @@ from PIL import Image
 if TYPE_CHECKING:
     from .report import ConversionReport
 
+from . import limits
 from .cbz import write_cbz
 from .config import PipelineOptions, parse_page_range
 from .devices import get_profile
+from .errors import InvalidOptionError
 from .epub.fixedlayout import build_image_epub
 from .pdfio import PdfRasterizer
 from .preprocess.pipeline import preprocess_for_image
@@ -36,6 +38,7 @@ class ConversionResult:
     pages_ocr: int = 0
     pages_direct_text: int = 0
     pages_image_fallback: int = 0
+    pages_structure_fallback: int = 0
     stripped_lines: list[str] = field(default_factory=list)
     mean_confidences: list[float] = field(default_factory=list)
     report: "ConversionReport | None" = None
@@ -91,7 +94,8 @@ def _volume_path(out_path: Path, index: int, total: int) -> Path:
 
 def ensure_output_outside_workdir(out_path: Path, work: WorkDir) -> None:
     if work.contains(out_path):
-        raise ValueError("Output path must not be inside the work dir, especially with --clean")
+        raise InvalidOptionError(
+            "Output path must not be inside the work dir, especially with --clean")
 
 
 def file_fingerprints(paths: list[Path]) -> list[list[int | str]]:
@@ -115,6 +119,14 @@ def extract_pages(
     progress: Progress | None = None,
 ) -> list[Path]:
     settings = {"dpi": dpi, "pages": indices, "v": 2}
+    # Fail on a --dpi typo in a second rather than after an hour of rendering.
+    if indices:
+        w_pt, h_pt = pdf.page_size_pts(indices[0])
+        scale = dpi / 72.0
+        limits.check("max_total_raster_pixels",
+                     w_pt * scale * h_pt * scale * len(indices),
+                     limits.MAX_TOTAL_RASTER_PIXELS,
+                     f"{len(indices)} pages at {dpi} DPI — lower --dpi or use --pages.")
     if force:
         work.invalidate("raw")
     work.begin_stage("raw", settings)
@@ -244,7 +256,10 @@ def inspect_pdf(pdf_path: Path, sample_pages: int = 5) -> dict:
         meta = pdf.metadata()
 
     avg_chars = sum(text_chars) / max(1, len(text_chars))
-    allowed, text_layer_reasons = _select_text_layer(text_samples, "auto")
+    # A *preview* verdict: inspect samples a handful of pages, so it can fall
+    # under MIN_MEASURABLE_PAGES and read more optimistically than the real
+    # conversion, which judges every page.
+    allowed, text_layer_reasons, book_verdict = _select_text_layer(text_samples, "auto")
     has_text_layer = bool(text_samples)
     text_layer_usable = bool(allowed)
     if text_layer_usable:
@@ -265,6 +280,7 @@ def inspect_pdf(pdf_path: Path, sample_pages: int = 5) -> dict:
         "has_text_layer": has_text_layer,
         "text_layer_usable": text_layer_usable,
         "text_layer_reasons": text_layer_reasons,
+        "book_verdict": book_verdict,
         "title": meta.get("title", ""),
         "author": meta.get("author", ""),
         "recommendation": recommendation,

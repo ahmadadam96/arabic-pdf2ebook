@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from ..errors import OcrUnavailableError
 from .base import OcrBackend, OcrLine, OcrPage, OcrWord
 
 INSTALL_HINT = (
@@ -27,7 +28,7 @@ class SuryaBackend(OcrBackend):
             from surya.detection import DetectionPredictor
             from surya.recognition import RecognitionPredictor
         except ImportError as exc:
-            raise RuntimeError(INSTALL_HINT) from exc
+            raise OcrUnavailableError(INSTALL_HINT) from exc
         self._recognition = RecognitionPredictor()
         self._detection = DetectionPredictor()
 

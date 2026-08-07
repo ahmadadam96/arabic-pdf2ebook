@@ -13,6 +13,7 @@ import shutil
 import urllib.request
 from pathlib import Path
 
+from ..errors import OcrUnavailableError
 from .base import OcrBackend, OcrLine, OcrPage, OcrWord
 
 DEFAULT_WINDOWS_PATHS = [
@@ -91,7 +92,7 @@ class TesseractBackend(OcrBackend):
 
         cmd = find_tesseract()
         if cmd is None:
-            raise RuntimeError(INSTALL_HINT)
+            raise OcrUnavailableError(INSTALL_HINT)
         pytesseract.pytesseract.tesseract_cmd = str(cmd)
         self._pt = pytesseract
         self.lang = lang

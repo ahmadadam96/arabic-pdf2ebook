@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from .errors import InvalidOptionError
+
 
 @dataclass(frozen=True)
 class DeviceProfile:
@@ -46,4 +48,4 @@ def get_profile(key: str) -> DeviceProfile:
         return PROFILES[key]
     except KeyError:
         valid = ", ".join(sorted(PROFILES))
-        raise ValueError(f"Unknown device profile '{key}'. Valid profiles: {valid}") from None
+        raise InvalidOptionError(f"Unknown device profile '{key}'. Valid profiles: {valid}") from None

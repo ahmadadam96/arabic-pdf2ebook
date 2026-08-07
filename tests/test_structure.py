@@ -134,3 +134,105 @@ def test_structure_page_emits_list_and_heading():
     assert kinds[0] == "h1"
     assert "p" in kinds
     assert kinds.count("ul") == 2
+
+
+# --- flat fallback (the coverage safety net) -----------------------------------
+
+def _no_drop(text: str, edge: bool) -> bool:
+    return False
+
+
+def test_flat_builder_keeps_every_kept_line():
+    """It loses structure by design; it must not lose a single line."""
+    from pagefixtures import line, page
+
+    from pdf2ebook.textproc.structure import structure_page_flat
+
+    texts = ["السطر الأول من الصفحة", "السطر الثاني من الصفحة", "والسطر الثالث والأخير"]
+    elements = structure_page_flat(page([line(t, 100 + 22 * i) for i, t in enumerate(texts)]),
+                                   True, _no_drop)
+    assert [kind for kind, _ in elements] == ["p", "p", "p"]
+    assert [text for _, text in elements] == texts
+
+
+def test_flat_builder_still_honours_the_junk_filter():
+    """Junk removal is not structure — a watermark must stay dropped."""
+    from pagefixtures import line, page
+
+    from pdf2ebook.textproc.structure import structure_page_flat
+
+    def drop_watermark(text: str, edge: bool) -> bool:
+        return "noor-book" in text
+
+    pg = page([line("www.noor-book.com", 30), line("نص الصفحة الحقيقي هنا وفيه كلام", 100)])
+    elements = structure_page_flat(pg, True, drop_watermark)
+    assert [text for _, text in elements] == ["نص الصفحة الحقيقي هنا وفيه كلام"]
+
+
+def test_low_coverage_page_falls_back_to_flat(monkeypatch):
+    """The measurement becomes an actuator.
+
+    The smart structurer is stubbed to drop half the page — the observable
+    contract is that the fallback fires, recovers the text, and says so in the
+    report rather than shipping a page with 50% of its words missing.
+    """
+    from pagefixtures import line, page
+
+    from pdf2ebook import ocrmode
+    from pdf2ebook.config import PipelineOptions
+    from pdf2ebook.report import ROUTE_TEXT
+
+    texts = [f"هذا هو السطر رقم {n} وفيه كلام كثير عن أحوال القوم وأخبارهم" for n in range(8)]
+    pg = page([line(t, 100 + 22 * i) for i, t in enumerate(texts)])
+
+    def lossy_structure_page(page_arg, keep_diacritics, drop_line, body_size=0.0):
+        real = [ln for ln in page_arg.lines if ln.text.strip()]
+        return [("p", ln.text) for ln in real[: len(real) // 2]]
+
+    monkeypatch.setattr(ocrmode, "structure_page", lossy_structure_page)
+
+    data = ocrmode.PageData(index=0, kind="text", payload=pg, route=ROUTE_TEXT)
+    markdown, report = ocrmode.structure_pages([data], PipelineOptions(), 12.0)
+
+    page_report = report.pages[0]
+    assert page_report.coverage >= 0.99, "fallback should have recovered the whole page"
+    assert any("structure fallback" in note for note in page_report.notes)
+    for text in texts:
+        assert text in markdown
+
+
+def test_structure_fallback_can_be_turned_off(monkeypatch):
+    from pagefixtures import line, page
+
+    from pdf2ebook import ocrmode
+    from pdf2ebook.config import PipelineOptions
+    from pdf2ebook.report import ROUTE_TEXT
+
+    texts = [f"سطر رقم {n} وفيه كلام كثير عن أحوال القوم وأخبارهم ومغازيهم" for n in range(8)]
+    pg = page([line(t, 100 + 22 * i) for i, t in enumerate(texts)])
+    monkeypatch.setattr(ocrmode, "structure_page",
+                        lambda p, k, d, b=0.0: [("p", ln.text)
+                                                for ln in list(p.lines)[: len(p.lines) // 2]])
+    data = ocrmode.PageData(index=0, kind="text", payload=pg, route=ROUTE_TEXT)
+    _, report = ocrmode.structure_pages([data], PipelineOptions(structure_fallback=False), 12.0)
+    assert report.pages[0].coverage < 0.8
+    assert not any("fallback" in note for note in report.pages[0].notes)
+
+
+def test_fallback_keeps_footnote_definitions(monkeypatch):
+    """The fallback rebuilds the body; the page's notes must come with it."""
+    from pagefixtures import NOTE, line, page
+
+    from pdf2ebook import ocrmode
+    from pdf2ebook.config import PipelineOptions
+    from pdf2ebook.report import ROUTE_TEXT
+
+    body = [line(f"سطر المتن رقم {n} وفيه كلام طويل عن أخبار القوم وأنسابهم", 100 + 22 * n)
+            for n in range(8)]
+    notes = [line("(١) انظر جمهرة أنساب العرب صفحة مئة وعشرين", 700, NOTE)]
+    monkeypatch.setattr(ocrmode, "structure_page",
+                        lambda p, k, d, b=0.0: [("p", ln.text)
+                                                for ln in list(p.lines)[: len(p.lines) // 2]])
+    data = ocrmode.PageData(index=0, kind="text", payload=page(body + notes), route=ROUTE_TEXT)
+    markdown, _ = ocrmode.structure_pages([data], PipelineOptions(), 12.0)
+    assert "[^p1-1]: انظر جمهرة أنساب العرب" in markdown

@@ -20,6 +20,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
 from .. import __version__
 from ..config import EpubMeta, ImageOptions, OcrOptions, PipelineOptions, validate_pipeline_options
+from ..errors import Pdf2EbookError
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -40,6 +41,9 @@ class Job:
     done: int = 0
     total: int = 1
     error: str = ""
+    #: Machine-readable failure kind from errors.Pdf2EbookError.code,
+    #: so the page can react (a password prompt for "encrypted", say).
+    error_code: str = ""
     outputs: list[Path] = field(default_factory=list)
     stats: dict = field(default_factory=dict)
 
@@ -88,10 +92,21 @@ def _run_job(job: Job, opts: PipelineOptions, out_path: Path) -> None:
             job.stats["routes"] = result.report.route_counts()
             job.stats["coverage"] = round(result.report.book_coverage, 3)
             job.stats["warnings"] = result.report.warnings
+            job.stats["book_verdict"] = result.report.book_verdict
+            job.stats["degraded_pages"] = [
+                {"page": p.page_no + 1, "notes": p.notes}
+                for p in result.report.degraded_pages()
+            ]
         job.status = "done"
-    except Exception as exc:  # surface anything to the page
+    except Pdf2EbookError as exc:
+        # Typed: the page can branch on the code (e.g. prompt for a password).
         job.status = "error"
         job.error = str(exc)
+        job.error_code = exc.code
+    except Exception as exc:  # unexpected: still surface it rather than hanging
+        job.status = "error"
+        job.error = str(exc)
+        job.error_code = "internal"
 
 
 @app.post("/api/convert")
@@ -146,6 +161,7 @@ def job_status(job_id: str) -> dict:
         "done": job.done,
         "total": job.total,
         "error": job.error,
+        "error_code": job.error_code,
         "stats": job.stats,
         "outputs": [{"index": i, "name": p.name, "size": p.stat().st_size}
                     for i, p in enumerate(job.outputs) if p.exists()],
@@ -167,7 +183,7 @@ def install_font(host: str = Form("")) -> dict:
 
     try:
         used_host, count, method = install_fonts_on_reader(host or None)
-    except Exception as exc:
+    except (Pdf2EbookError, OSError, RuntimeError) as exc:
         raise HTTPException(502, f"Font install failed: {exc}") from exc
     return {"ok": True, "host": used_host, "files": count, "restart_needed": method == "manual"}
 
@@ -181,7 +197,7 @@ def send(job_id: str = Form(...), index: int = Form(0), host: str = Form("")) ->
         raise HTTPException(404, "unknown output")
     try:
         target = send_to_reader(job.outputs[index], host or None)
-    except Exception as exc:
+    except (Pdf2EbookError, OSError, RuntimeError) as exc:
         raise HTTPException(502, f"Upload failed: {exc}") from exc
     return {"ok": True, "host": target}
 

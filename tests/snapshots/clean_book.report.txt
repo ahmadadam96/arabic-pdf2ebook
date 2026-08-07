@@ -1,0 +1,7 @@
+verdict: الطبقة النصية مقبولة (عينة صغيرة: 1 صفحة قابلة للقياس) — text layer accepted on a small sample of 1 measurable page(s).
+coverage: 1.00
+
+page 1: route=text-layer coverage=1.00 src=234 dropped=0 emitted=234
+  reason: embedded text layer
+page 2: route=text-layer coverage=1.00 src=141 dropped=0 emitted=141
+  reason: embedded text layer

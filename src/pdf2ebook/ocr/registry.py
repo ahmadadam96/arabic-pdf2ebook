@@ -3,6 +3,7 @@ unless requested)."""
 
 from __future__ import annotations
 
+from ..errors import InvalidOptionError
 from .base import OcrBackend
 
 
@@ -15,7 +16,7 @@ def get_backend(name: str, lang: str = "ara", psm: int = 4) -> OcrBackend:
         from .surya_backend import SuryaBackend
 
         return SuryaBackend()
-    raise ValueError(f"Unknown OCR engine '{name}'. Use 'tesseract' or 'surya'.")
+    raise InvalidOptionError(f"Unknown OCR engine '{name}'. Use 'tesseract' or 'surya'.")
 
 
 def backend_status() -> dict[str, tuple[bool, str]]:

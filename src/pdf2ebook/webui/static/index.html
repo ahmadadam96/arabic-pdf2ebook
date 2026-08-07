@@ -199,6 +199,9 @@ async function poll() {
   if (job.status === 'error') {
     bar.hidden = true;
     statusEl.textContent = '❌ ' + job.error;
+    if (job.error_code === 'encrypted') {
+      statusEl.textContent += ' — أزل كلمة المرور من الملف ثم أعد المحاولة.';
+    }
     return;
   }
   bar.value = bar.max;
@@ -211,9 +214,25 @@ async function poll() {
   }
   statusEl.textContent = summary;
   const warnEl = document.getElementById('report-warn');
-  const warnings = (job.stats && job.stats.warnings) || [];
-  if (warnings.length) {
-    warnEl.innerHTML = warnings.map(w => w.replace(/</g, '&lt;')).join('<br>');
+  const esc = t => String(t).replace(/</g, '&lt;');
+  // The book-level text-layer verdict and any per-page losses belong next to
+  // the warnings: a user should not have to open report.json to learn that
+  // half the book was re-read by OCR, or that a page lost its font metrics.
+  const notices = [];
+  if (job.stats && job.stats.book_verdict) {
+    notices.push('📄 ' + esc(job.stats.book_verdict));
+  }
+  const degraded = (job.stats && job.stats.degraded_pages) || [];
+  degraded.slice(0, 5).forEach(p => {
+    notices.push(`⚠ صفحة ${p.page}: ${esc((p.notes || [])[0] || '')}`);
+  });
+  if (degraded.length > 5) {
+    notices.push(`…و${degraded.length - 5} صفحة أخرى — and ${degraded.length - 5} more (report.json)`);
+  }
+  const warnings = ((job.stats && job.stats.warnings) || []).map(esc);
+  const lines = notices.concat(warnings);
+  if (lines.length) {
+    warnEl.innerHTML = lines.join('<br>');
     warnEl.style.display = 'block';
   } else {
     warnEl.style.display = 'none';
