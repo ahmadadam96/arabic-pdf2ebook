@@ -10,4 +10,5 @@ dist/
 *.workdir/
 *.epub
 *.cbz
+books/
 .coverage

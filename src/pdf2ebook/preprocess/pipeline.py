@@ -21,7 +21,8 @@ def preprocess_for_ocr(img: Image.Image, fast: bool = False) -> Image.Image:
 
 
 def preprocess_for_image(img: Image.Image, width: int, height: int,
-                         style: str = "gray", fast: bool = True) -> Image.Image:
+                         style: str = "gray", fast: bool = True,
+                         fill: bool = False) -> Image.Image:
     """Deskew → denoise → CLAHE → autocrop → scale to device. Keeps grayscale tone."""
     gray = ops.from_pil(img)
     gray = ops.deskew(gray)
@@ -30,6 +31,8 @@ def preprocess_for_image(img: Image.Image, width: int, height: int,
     gray = ops.autocrop(gray)
     if style == "binary":
         gray = ops.sauvola(gray)
+    if fill:
+        return ops.scale_to_fill_width(ops.to_pil(gray), width)
     return ops.scale_to_device(ops.to_pil(gray), width, height)
 
 

@@ -71,6 +71,13 @@ def convert(
     split_every: int = typer.Option(10, help="Chapter fallback: one chapter per N pages (OCR mode)"),
     layout: str = typer.Option("flow", help="Image EPUB layout: flow | fixed"),
     style: str = typer.Option("gray", help="Image tone: gray | binary"),
+    split: int = typer.Option(
+        1, "--split",
+        help="Image mode: scale each page to the screen width, then slice it "
+             "into screen-sized vertical bands so the text fills the reader "
+             "(cuts snap to blank text gaps; covers and photos stay whole). "
+             "0 = auto-pick the band count to fit the screen height.",
+    ),
     cbz: bool = typer.Option(False, "--cbz", help="Also write a CBZ (image mode)"),
     font: str = typer.Option("amiri", help="Embedded font: amiri | none"),
     preshape: bool = typer.Option(
@@ -113,7 +120,7 @@ def convert(
         ocr=OcrOptions(engine=engine, lang=lang, psm=psm, min_conf=min_conf,
                        rescue=rescue, strip_patterns=list(strip_pattern)),
         image=ImageOptions(device=device, width=width, height=height, style=style,
-                           layout=layout, cbz=cbz),
+                           layout=layout, cbz=cbz, split=split),
         meta=EpubMeta(title=title or "", author=author or ""),
     )
     try:

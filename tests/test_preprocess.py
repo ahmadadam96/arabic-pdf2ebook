@@ -54,6 +54,59 @@ def test_scale_to_device_never_upscales(text_page_image):
     assert out.size == text_page_image.size
 
 
+def test_scale_to_fill_width_fills_and_overflows(text_page_image):
+    out = ops.scale_to_fill_width(text_page_image, 400)
+    assert out.width == 400
+    ratio_in = text_page_image.width / text_page_image.height
+    ratio_out = out.width / out.height
+    assert abs(ratio_in - ratio_out) < 0.02
+
+
+def test_preprocess_for_image_split_scales_to_width(text_page_image):
+    out = preprocess_for_image(text_page_image, 400, 600, fill=True)
+    assert out.mode == "L"
+    assert out.width == 400
+
+
+def test_smart_split_never_bisects_text_lines():
+    from pdf2ebook.pipeline import _smart_band_boundaries
+
+    # 900px tall page: a text line (dark rows) at y=430..450, otherwise blank.
+    img = np.full((900, 400), 255, dtype=np.uint8)
+    img[430:451, 40:360] = 0
+    # Split into 2 bands: the boundary must land in a blank row, not on the line.
+    cuts = _smart_band_boundaries(Image.fromarray(img, mode="L"), 2, 450)
+    assert len(cuts) == 1
+    assert not 425 <= cuts[0] <= 455  # never through the dark text line
+
+
+def test_smart_split_two_blank_rows_uses_clearest():
+    from pdf2ebook.pipeline import _smart_band_boundaries
+
+    img = np.full((800, 400), 255, dtype=np.uint8)
+    img[100:200, 40:360] = 0   # top block
+    img[550:700, 40:360] = 0   # bottom block
+    cuts = _smart_band_boundaries(Image.fromarray(img, mode="L"), 2, 400)
+    assert len(cuts) == 1
+    # Boundary should prefer the wide blank middle (y 200-550), near target 400.
+    assert 250 <= cuts[0] <= 500
+
+
+def test_split_pages_keeps_photo_pages_whole(tmp_path):
+    from pdf2ebook.pipeline import split_pages
+    from pdf2ebook.workdir import WorkDir
+
+    pdf = tmp_path / "book.pdf"
+    pdf.touch()
+    work = WorkDir(tmp_path / "work", pdf)
+    src = tmp_path / "page_0001.png"
+    Image.new("L", (1264, 2895), 60).save(src)  # mostly dark = photo/cover
+    out = split_pages(work, [src], 0, 1680)
+    assert len(out) == 1  # one full page, not split into bands
+    with Image.open(out[0]) as im:
+        assert im.size == (1264, 2895)
+
+
 def test_preprocess_for_image_pipeline(text_page_image):
     out = preprocess_for_image(text_page_image, 758, 1024)
     assert out.mode == "L"

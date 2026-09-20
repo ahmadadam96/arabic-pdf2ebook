@@ -16,7 +16,7 @@ from PIL import Image
 from ..errors import InvalidOptionError
 from ..limits import FIXED_LAYOUT_JPEG_QUALITY as JPEG_QUALITY
 from .opf import ManifestItem, build_ncx, build_nav, build_opf, stable_book_id
-from .templates import IMAGE_CSS, xhtml_page
+from .templates import IMAGE_CSS, IMAGE_FILL_CSS, xhtml_page
 from .validate import validate_epub
 from .zipwriter import EpubContainer
 
@@ -44,6 +44,7 @@ def build_image_epub(
     viewport: tuple[int, int] | None = None,
     toc_every: int = 20,
     progress: Callable[[int], None] | None = None,
+    fill: bool = False,
 ) -> Path:
     if not page_paths:
         raise InvalidOptionError("Cannot build an image EPUB without page images")
@@ -60,7 +61,7 @@ def build_image_epub(
     toc: list[tuple[str, str]] = []
 
     with EpubContainer(out_path) as epub:
-        epub.add("OEBPS/styles/style.css", IMAGE_CSS)
+        epub.add("OEBPS/styles/style.css", IMAGE_FILL_CSS if fill else IMAGE_CSS)
         for i, src in enumerate(page_paths):
             data, ext, media_type = _encode_page(src, style)
             img_name = f"images/page_{i + 1:04d}.{ext}"

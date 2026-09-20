@@ -68,6 +68,7 @@ class ImageOptions:
     style: str = "gray"  # gray | binary
     layout: str = "flow"  # flow | fixed
     cbz: bool = False
+    split: int = 1  # slice each tall page into N vertical bands (0 = auto fit screen height)
 
 
 @dataclass
@@ -119,3 +120,5 @@ def validate_pipeline_options(opts: PipelineOptions) -> None:
         raise InvalidOptionError("width must be positive")
     if opts.image.height is not None and opts.image.height < 1:
         raise InvalidOptionError("height must be positive")
+    if opts.image.split < 0:
+        raise InvalidOptionError("split must be 0 (auto) or a positive band count")

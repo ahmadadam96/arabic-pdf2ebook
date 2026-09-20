@@ -37,6 +37,12 @@ div.page { text-align: center; page-break-after: always; }
 div.page img { max-width: 100%; max-height: 100%; }
 """
 
+IMAGE_FILL_CSS = """\
+html, body { margin: 0; padding: 0; }
+div.page { text-align: center; page-break-after: always; }
+div.page img { max-width: 100%; }
+"""
+
 FONT_FACE_CSS = """\
 @font-face {{
   font-family: "{family}";

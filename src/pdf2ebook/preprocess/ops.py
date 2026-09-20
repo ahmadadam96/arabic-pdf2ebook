@@ -166,3 +166,17 @@ def scale_to_device(img: Image.Image, width: int, height: int) -> Image.Image:
         return img
     new_size = (max(1, math.floor(img.width * factor)), max(1, math.floor(img.height * factor)))
     return img.resize(new_size, Image.LANCZOS)
+
+
+def scale_to_fill_width(img: Image.Image, width: int) -> Image.Image:
+    """Scale the page so it spans exactly `width`, preserving aspect ratio.
+
+    Unlike scale_to_device this upscales too and lets the height overflow the
+    target screen: on narrow scanned pages the text block then fills the full
+    reader width and you scroll vertically through the page.
+    """
+    if width <= 0 or img.width == width:
+        return img
+    factor = width / img.width
+    new_size = (width, max(1, math.floor(img.height * factor)))
+    return img.resize(new_size, Image.LANCZOS)

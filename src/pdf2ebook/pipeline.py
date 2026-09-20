@@ -7,6 +7,7 @@ settings (and the source PDF) are unchanged.
 
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -143,8 +144,95 @@ def extract_pages(
 
 
 # ---------------------------------------------------------------------------
-# Stage: preprocess for image mode → pre-image/ PNGs
+# Stage: split tall pages into screen-sized vertical bands (image mode + fill)
 # ---------------------------------------------------------------------------
+
+def _row_ink_profile(img: Image.Image) -> "np.ndarray":
+    """Fraction of dark pixels per image row — low values are inter-line gaps."""
+    import numpy as np
+
+    gray = np.asarray(img.convert("L"))
+    return (gray < 128).mean(axis=1)
+
+
+def _smart_band_boundaries(img: Image.Image, n: int, screen_height: int) -> list[int]:
+    """Pick vertical cut rows that land in text gaps, not mid-line.
+
+    The page is divided into `n` equal-height target bands; each boundary then
+    slides to the least-inky row (a blank gap between paragraphs or lines)
+    within a window around its target, so no text line is cut in half.
+    """
+    import numpy as np
+
+    h = img.height
+    profile = _row_ink_profile(img)
+    if n <= 1 or h == 0:
+        return []
+    window = max(2, int(min(h / n, screen_height) * 0.25))
+    boundaries: list[int] = []
+    for i in range(1, n):
+        target = int(h * i / n)
+        lo = max(0, target - window)
+        hi = min(h, target + window + 1)
+        if hi - lo < 1:
+            boundaries.append(target)
+            continue
+        best = int(np.argmin(profile[lo:hi])) + lo
+        boundaries.append(best)
+    return boundaries
+
+
+def split_pages(
+    work: WorkDir,
+    pre_paths: list[Path],
+    bands: int,
+    screen_height: int,
+    force: bool = False,
+) -> list[Path]:
+    """Slice each full-width text page into screen-sized vertical bands.
+
+    A narrow scanned page scaled to the screen width is far taller than the
+    screen; reading it means panning. Splitting turns each tall page into
+    screen-sized bands so the text fills the reader with no scrolling.
+    `bands=0` picks the count automatically so each band fits the screen height.
+    Cuts are snapped to blank rows so text lines are never bisected.
+    Full-page images (covers, plates, photos) are left intact — splitting a
+    picture into bands makes no sense.
+    """
+    from .preprocess.pipeline import detect_image_page
+
+    out_dir = work.root / "pre-split"
+    if force:
+        import shutil
+
+        shutil.rmtree(out_dir, ignore_errors=True)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_paths: list[Path] = []
+    for src in pre_paths:
+        with Image.open(src) as img:
+            if detect_image_page(img):
+                # Cover/plate/photo: keep as a single full-width page.
+                out = out_dir / f"{src.stem}__01.png"
+                if not out.exists():
+                    img.save(out, format="PNG")
+                out_paths.append(out)
+                continue
+            n = bands
+            if n <= 0:
+                n = max(1, math.ceil(img.height / screen_height)) if screen_height > 0 else 1
+            n = max(1, n)
+            cuts = _smart_band_boundaries(img, n, screen_height)
+            bounds = [0] + cuts + [img.height]
+            for i in range(len(bounds) - 1):
+                top, bottom = bounds[i], bounds[i + 1]
+                if bottom - top < 1:
+                    continue
+                crop = img.crop((0, top, img.width, bottom))
+                out = out_dir / f"{src.stem}__{i + 1:02d}.png"
+                if not out.exists():
+                    crop.save(out, format="PNG")
+                out_paths.append(out)
+    return out_paths
 
 def preprocess_image_pages(
     work: WorkDir,
@@ -154,11 +242,13 @@ def preprocess_image_pages(
     style: str,
     force: bool = False,
     progress: Progress | None = None,
+    fill: bool = False,
 ) -> list[Path]:
     settings = {
         "width": width,
         "height": height,
         "style": style,
+        "fill": fill,
         "raw": file_fingerprints(raw_paths),
         "v": 2,
     }
@@ -170,7 +260,7 @@ def preprocess_image_pages(
         out = work.root / "pre-image" / src.name
         if not out.exists():
             with Image.open(src) as img:
-                processed = preprocess_for_image(img, width, height, style=style)
+                processed = preprocess_for_image(img, width, height, style=style, fill=fill)
                 processed.save(out, format="PNG")
         out_paths.append(out)
         if progress:
@@ -201,8 +291,13 @@ def run_image_mode(
         force_extract = opts.force in ("extract", "all")
         force_pre = opts.force in ("preprocess", "all") or force_extract
         raw_paths = extract_pages(pdf, work, indices, opts.dpi, force_extract, progress)
+        split_pages_on = opts.image.split != 1
         pre_paths = preprocess_image_pages(work, raw_paths, width, height,
-                                           opts.image.style, force_pre, progress)
+                                           opts.image.style, force_pre, progress,
+                                           fill=split_pages_on)
+        if split_pages_on:
+            pre_paths = split_pages(work, pre_paths, opts.image.split, height,
+                                    force=force_pre)
 
     title = opts.meta.title or default_title(pdf_path)
     chunks = _volume_chunks(pre_paths, opts.split_volumes)
@@ -220,6 +315,7 @@ def run_image_mode(
             chunk, vol_out, vol_title, author=opts.meta.author, language=opts.meta.language,
             style=opts.image.style, layout=opts.image.layout,
             viewport=(width, height) if width and height else None,
+            fill=split_pages_on,
             progress=page_progress,
         )
         result.outputs.append(vol_out)
